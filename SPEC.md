@@ -21,7 +21,7 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 ### Non-goals
 
 - Supporting Linux, Windows, package managers other than Homebrew, or remote Homebrew installations.
-- Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package.
+- Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package. **[REWRITE ADDITION]** Reporting which packages `brew outdated` names is a read and is not covered by this non-goal; the app surfaces the fact and takes no action on it. Section 9A designs an upgrade action but does not implement one, and this non-goal is amended only by the increment that implements it.
 - Listing formulae installed only as dependencies.
 - Pre-authenticating with `sudo -v` or prompting for a password before Homebrew asks for one.
 - Caching or reusing administrator passwords.
@@ -41,8 +41,11 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 | `name` | First non-whitespace token from one nonblank `brew list` output line. |
 | `version` | The complete remainder of that trimmed line after the first token; it may be empty. |
 | `kind` | Exactly `cask` or `formula`. No third value is valid. |
+| `outdated` **[REWRITE ADDITION]** | Whether `brew outdated` reports the package for its kind. False when that read failed or was never made. |
 
-Package identity and the package-info cache key are `(kind, name)`. Version is display data, not identity.
+Package identity and the package-info cache key are `(kind, name)`. Version and `outdated` are display data, not identity.
+
+**[REWRITE ADDITION]** `outdated` replaces nothing; it is a fourth field on a value that previously carried three. It is display data specifically: it stays out of the info cache key, out of the search filter target, and out of every argv, so adding it cannot change which panel is cached, which rows a query matches, or what any command runs. It is set from the section 5 outdated read at list time and is never derived from comparing two version strings.
 
 **[REWRITE ADDITION]** Before `brew info` or `brew uninstall`, reject an inventory value whose name is empty, begins with `-`, or contains NUL or a Unicode control character. An info rejection uses the cache/info-pane text `Unsafe package name; info refused`; an uninstall rejection reports `Unsafe package name; uninstall refused`. Either rejection starts no process. This guard keeps the parity argv forms below from interpreting an inventory value as an option.
 
@@ -149,6 +152,30 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | Uninstall | cask | `brew`, `uninstall`, `--cask`, `<confirmed-name>` |
 | Uninstall | formula | `brew`, `uninstall`, `--formula`, `<confirmed-name>` |
 | Dependents **[REWRITE ADDITION]** | formula | `brew`, `uses`, `--installed`, `<name>` |
+| Outdated **[REWRITE ADDITION]** | cask | `brew`, `outdated`, `--cask`, `--quiet` |
+| Outdated **[REWRITE ADDITION]** | formula | `brew`, `outdated`, `--formula`, `--quiet` |
+
+**[REWRITE ADDITION]** The outdated vectors are new; they replace no earlier vector and change none. They carry no package value, only a kind, so the section 3 name validator has nothing to guard here. `--quiet` gives one bare name per nonblank line, parsed by the same parser as the dependents output. `--json=v2` is not used: names are all that is needed, and the JSON carries no installed size, so it would not earn a second parser.
+
+`--greedy` must never be added. Homebrew's default set is already its own verdict about what `brew upgrade` would act on, and it deliberately excludes auto-updating casks it will not touch. Measured on the development machine: `brew outdated --cask --quiet` returns exactly `postman`, while adding `--greedy` returns 14 names including `firefox` — an `auto_updates` cask installed at 153.0.4 against Homebrew's 154.0 that `brew upgrade` will not touch. Marking firefox would be exactly the false claim the section 6 restraint forbids, so the flag is prohibited rather than merely unused.
+
+**[REWRITE ADDITION]** Every command this adapter starts inherits `HOMEBREW_NO_AUTO_UPDATE=1`, appended to the environment rather than substituted for it.
+
+`install`, `outdated`, `upgrade`, `bundle` and `release` are Homebrew's `AUTO_UPDATE_COMMANDS`. With `HOMEBREW_NO_AUTO_UPDATE` unset — the default — the first such command in each `HOMEBREW_AUTO_UPDATE_SECS` window runs `brew update --auto-update` before the command that was asked for: a network fetch that mutates the local Homebrew installation and its tap clones. Adding the outdated vectors brought the first such command into this application, and `list`, `info` and `uses` are not in that set, so nothing here triggered it before.
+
+Two consequences make the suppression mandatory rather than an optimisation. These reads run inside the load that gates first paint, so a launch a day after the machine's last fetch would hold `Loading casks...` for as long as the network takes, with only supervised `q` accepted — unbounded, not merely slow. And the auto-update report is written to stdout in the same process that then execs the real command, so it lands in the buffer this adapter parses; a deleted-formula or deleted-cask line names an installed package by construction, and would be read back as inventory or as an outdated name.
+
+It is applied to every read rather than only to the outdated vectors. Section 2 promises an application that mutates nothing except a doubly-confirmed uninstall, and updating the user's Homebrew as a side effect of drawing a list is outside that promise whichever read triggers it.
+
+A test must assert the variable as the child received it, not as the parent set it. The development machine's shell exports `HOMEBREW_NO_AUTO_UPDATE=1`, which is precisely why this went unnoticed while the feature was built and measured.
+
+The two kinds must never be collapsed into one `brew outdated --quiet` call. A formula and a cask can share a name, and the marker set is consulted per kind, so a combined call would let one inventory's outdated name mark the other inventory's row.
+
+**[REWRITE ADDITION]** An absent marker asserts less than it appears to. `brew outdated --formula` also names the dependency-only formulae that the `--installed-on-request` inventory of section 3 never shows, and those names are discarded because no visible row carries them. A formula screen with no markers therefore means "none of the request-installed formulae shown here is outdated", never "nothing on this machine needs upgrading". The same holds when the outdated read fails: the list still loads, carrying no marks, which is indistinguishable on screen from a screen where nothing is outdated. Neither the row nor the status line claims otherwise, and no all-clear is stated anywhere.
+
+The detail panel does distinguish the two, because it has room to. `Version` renders `(up to date)` only where a verdict was actually obtained; where the read failed and Homebrew's own text shows no newer version, the parenthetical is dropped and the installed version stands alone. This is the section 6 restraint about withheld evidence applied to freshness: a newer version parsed from `brew info` is independent evidence and still renders as `(latest <version>)` without a verdict.
+
+The marker's meaning is delegated wholesale to Homebrew: "`brew outdated` reports this", which is also the precondition for upgrading it. This specification deliberately does not restate Homebrew's rule for which `auto_updates` casks land in the default set — `postman` does and `firefox` does not, and that rule could not be established from the receipts. The consequence is accepted: if Homebrew changes that default, the markers change with no code change here and no failing test.
 
 **[REWRITE ADDITION]** There is no cask form of the dependents vector, and one must not be added. `brew uses` resolves its argument as a formula, so a cask token makes it warn about an unknown formula and report nothing; a cask must never be allowed to read as "nothing depends on this". `Uses` rejects a non-formula kind before starting any process, and applies the same package-name validator as `Info`, reporting `Unsafe package name; dependents refused`. Its output is one installed formula name per nonblank line.
 
@@ -220,7 +247,15 @@ The normal footer's exact logical string is `[/ or s] search  tab switch  u unin
 
 Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `[/ or s] search  tab switch  u`: cell 30 is the `u` of `u uninstall`. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
-Package rows render a selection marker, name, kind, and optional version. The row shape is ` <marker> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
+Package rows render a selection marker, a freshness cell, name, kind, and optional version. **[REWRITE ADDITION]** The row shape is ` <marker><freshness> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row and `<freshness>` is one fixed cell holding `↑` for a package `brew outdated` reports and a space otherwise. This replaces the earlier ` <marker> <name-column> <kind>[ <version>]`, which had no cell for the outdated verdict. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
+
+**[REWRITE ADDITION]** The freshness cell sits immediately after the selection marker, so the narrow layout — where the list is the only pane and the marker matters most — cannot clip it away. It is taken from the name column, and only where the 30-cell cap is not already absorbing the slack: the name column arithmetic becomes `min(30, max(8, pane-width - 5 - len(kind)))`, one cell tighter than the previous `pane-width - 4 - len(kind)`. At 32 columns a cask row's name column goes from 22 to 21 cells and a formula row's from 19 to 18; at 72 columns from 27 to 26; at 80 columns and wider it stays 30, because the cap already discarded that cell. No pane, divider, border, or total row width changes.
+
+Those counts are against the full row pane. A visible scrollbar takes one further cell from the same arithmetic, so with one present each count above drops by one — at 32 columns an unfiltered formula row's name column is 17, not 18. The pinned numbers therefore describe a list short enough or filtered enough to need no scrollbar; both values follow from the same expression, whose input is the row pane width rather than the list pane width.
+
+The cell carries a glyph rather than a color, for the same reason the scrollbar thumb does: the cue must survive a monochrome theme. Because it lives inside the row string it inherits the selected-row style, including the monochrome reverse+bold, with no nested style. `↑` is an East-Asian-ambiguous-width character; the pinned Lip Gloss v2.0.6 measures it as one cell, and `•` and `█` are existing precedent for such a glyph here. A terminal configured to render ambiguous glyphs double-wide would shift every row by one cell at runtime — a terminal setting no test in this repository can observe. A unit assertion on the measured width therefore guards a dependency bump, not a terminal configuration.
+
+The marker is not appended after the version: at 32 columns the pane is 30 cells and the row is already full at the kind column, so a trailing marker would be clipped exactly where the list is the only pane. Nor is it folded into the kind column as `cask*`: that would make the name column width differ per row, and the kind column would stop aligning within a pane — the same alignment reason the info panel's label width is fixed. Nor is it folded into the selection-marker cell, which cannot carry two independent bits without a cryptic third glyph.
 
 #### List scrollbar
 
@@ -257,7 +292,7 @@ Rows appear only when their value is available, in this order:
 
 | Row | Value |
 |---|---|
-| `Version` | Installed version, then `(up to date)` when it matches what Homebrew offers, or `(latest <version>)` when it does not. |
+| `Version` **[REWRITE ADDITION]** | Installed version, then exactly one of: `(outdated, latest <version>)` when `brew outdated` reports the package and a distinct newer version parses; `(outdated)` when it reports the package and no distinct newer version parses; `(latest <version>)` when it does not report the package but the parsed versions differ; `(up to date)` otherwise. |
 | `Size` | Installed size, then file count when Homebrew reports one. |
 | `Installed` | `as a dependency`, and only then. |
 | `License` | Homebrew's license field. Formulae only; casks do not carry one. |
@@ -270,11 +305,13 @@ The verdict row is `Safe to remove.` when a formula has no installed dependents,
 
 Three deliberate restraints, because this pane feeds a destructive action:
 
-1. A version is never labelled `outdated`. An auto-updating cask legitimately sits behind Homebrew's version, so the pane names the newer version and draws no conclusion.
+1. **[REWRITE ADDITION]** A version is labelled `outdated` only on Homebrew's own `brew outdated` verdict, never from a version mismatch. This replaces the earlier absolute "a version is never labelled `outdated`", which withheld a fact Homebrew is willing to state, because the only source available at the time was a version comparison the pane was right not to trust. The reason for that distrust is unchanged and now pinned by example: firefox is an `auto_updates` cask installed at 153.0.4 while Homebrew offers 154.0, and `brew outdated --cask` does not report it, so its row carries no marker and its panel still reads `Version    153.0.4  (latest 154.0)` — a version mismatch is still reported with no conclusion drawn. The normative consequence is that `(up to date)` must never render for a package `brew outdated` reports, and `outdated` must never render for one it does not.
 2. `Needed by` and the verdict require a dependent lookup that actually succeeded. A cask has no such lookup, and a formula whose lookup failed gets neither row: absence of evidence must never render as an assurance of safety.
 3. A failed dependent lookup does not fail the load. The panel renders without those two rows, since details that did load are more useful than an error for a package whose details are fine.
 
 The fields are parsed from the same `brew info` text, not from `brew info --json=v2`, because the JSON carries no installed size and size is the field this screen exists for. Any row that cannot be parsed is omitted, and when neither a description nor a size can be found the raw text is rendered unchanged — a Homebrew output change degrades to the parity behaviour rather than to a blank pane.
+
+**[REWRITE ADDITION]** The one field not parsed from that text is the outdated verdict. It arrives on the section 3 package value from the section 5 outdated read, so exactly one component decides the word and the panel cannot form a second opinion from the two version strings it already parses. Those strings remain display detail; the verdict is the fact. The list row and this panel therefore render one value from one source and cannot disagree.
 
 On a new info target, set viewport Y offset to zero. There are no info-scrolling keys; the viewport supplies width-aware wrapping and clipping, not an additional navigation feature. Info loading continues and caches results even while the terminal is too narrow to show the pane.
 
@@ -291,6 +328,8 @@ Render the first applicable state:
 `<query-or-—>` uses an em dash for an empty query.
 
 **[REWRITE ADDITION]** The normal search prefix carries the section 3 list count as its own ` | `-joined segment, between the query and any ordinary status, and is omitted when the list is empty. Rows 4 and 5 above therefore render as `Search [/ or s]: <query-or-—> | <count> | <status>` and `Search [/ or s]: <query-or-—> | <count>`. Rows 1 through 3 are unchanged and carry no count.
+
+**[REWRITE ADDITION]** The status prefix gains no outdated segment. It stays exactly `Search [/ or s]: <query-or-—> | <count> | <status>` with three segments. The row markers already carry the number, and a count there would be a second, weaker statement of the same fact — the same reason the list's own Bubbles pagination view stays disabled.
 
 ### Themes
 
@@ -387,7 +426,15 @@ An old-generation info process may finish, but its result follows the stale-resu
 
 ### Kind switch, startup loading, and exact loading modes
 
-Homebrew I/O runs in `tea.Cmd`, never inside `Update`. Startup initializes the cask model and starts its list command from `Init`. A kind switch resets selection/offset and starts the target kind's list command. There is at most one list command at a time. Each list operation owns a retained context/cancel function until its typed result message has been handled; the command adapter has then returned from `Run`/`Wait` and reaped its directly owned child.
+Homebrew I/O runs in `tea.Cmd`, never inside `Update`. Startup initializes the cask model and starts its list command from `Init`. A kind switch resets selection/offset and starts the target kind's list command. There is at most one list command at a time. Each list operation owns a retained context/cancel function until its typed result message has been handled; the command adapter has then returned from `Run`/`Wait` and reaped both of its directly owned children.
+
+**[REWRITE ADDITION]** That one list command performs two concurrent Homebrew reads for the same kind — the section 5 list vector and the section 5 outdated vector — and returns one typed result message carrying packages already marked. "At most one list command at a time" is preserved literally: one command, one retained context, one cancel function, one completion handle, one message, one cache entry, one invalidation pair. No second command, context, message type, or supervisor slot exists for the outdated read. The two reads must write two distinct locals joined before either is read; neither may touch model state, which the Tea loop mutates concurrently.
+
+There is deliberately no second, independently-landing outdated command. It would duplicate the list command's set/clear and quit-guard bookkeeping, and — decisively — the info fetch and the outdated fetch would race, so the list row and the detail panel would visibly disagree about one fact for several hundred milliseconds.
+
+The measured cost is a startup and load regression, and it is accepted: a load now takes `max(list, outdated)` rather than `list`. On the development machine `brew list --cask -1` is about 30 ms and `brew outdated --cask --quiet` about 550 ms, so a cold cask start goes from roughly 30 ms to roughly 550 ms; a cold formula load goes from roughly 400 ms to roughly 600 ms. The existing spinner and `Loading ...` status already own that window, and every other Homebrew read in this app is already a half-second read.
+
+Those figures hold only because the adapter suppresses Homebrew's auto-update; see section 5. They were first measured on a shell that exported `HOMEBREW_NO_AUTO_UPDATE=1`, which made the suppressed case look like the default one. Without the suppression the same read is unbounded rather than slow, so the number above is a cost only under the guarantee that section 5 now makes explicit.
 
 ### List cache
 
@@ -405,6 +452,12 @@ The info cache and the list cache are invalidated together at both sites and mus
 Retention is per session and is not revalidated. An install or uninstall performed in another terminal is not observed until `r`. Parity's per-switch re-list masked that, at the cost of the empty pane on every switch; `r` is the explicit remedy.
 
 A failed list result caches nothing, so a broken Homebrew never poisons retention. The other kind's earlier retention does survive that failure and can still be switched to.
+
+**[REWRITE ADDITION]** The retained per-kind list carries its outdated marks. A cached kind switch therefore renders them in the same frame as the key press and still starts no command; the marks are part of the retained value, never re-fetched.
+
+A failed outdated read is absorbed, exactly as a failed dependent lookup is. The list result is still a success, is still retained, and simply carries no marks; the detail panel keeps its unmarked wording. A broken outdated read must never poison retention, fail the load, or render as an assurance that nothing is outdated.
+
+The marks are per session and are not revalidated, on the same terms as the list itself: an upgrade performed in another terminal is not observed until `r`, which is the explicit remedy. Because the marks are baked into the formatted text the info cache holds, the info cache and the list cache must continue to be dropped together at every invalidation site; a site that dropped one but not the other would let a stale marker disagree with a stale panel.
 
 The key, priority-status, and footer contracts while a list command is active are exact:
 
@@ -452,6 +505,83 @@ The starting-uninstall state is committed and renderable before the returned com
 - On uninstall command success, do not yet show success. Enter the exact post-uninstall reload state in section 8. If reload succeeds, set `Uninstalled <snapshot-name>`, clamp selection/offset, and schedule fresh selected-package info. If reload fails, show the reload error and do not show `Uninstalled`. A cleanup failure can never be reported as success.
 
 **[CURRENT/PARITY]** Success is observable only after both `brew uninstall` and the active list reload succeed.
+
+## 9A. Upgrade — designed, not implemented
+
+**[REWRITE ADDITION]** This section is a design, not a shipped contract. No code implements it. Nothing in sections 1 through 9 or 10 through 17 describes upgrade behaviour, the `g` key does not exist, the footer string is unchanged, and section 2's non-goal against mutating packages other than by uninstalling still holds exactly as written. That non-goal is amended only by the increment that implements this section; until then it is correct as it stands.
+
+It is written down for one reason: `brew upgrade` on a cask can require administrator authentication exactly as `brew uninstall` can, so an upgrade action needs the whole `internal/uninstall` machinery — private askpass endpoint, kernel peer authentication, tracked process group, bounded cleanup, immutable confirmation snapshot. That machinery must be generalised, never forked, copied, or bypassed. A second copy of the security path would be a worse outcome than no upgrade action at all. The generalisation below was checked against the implementation; it is small, and the reason for deferring it is entirely in `internal/ui`.
+
+### What is already operation-agnostic
+
+The security core carries nothing uninstall-specific: the endpoint, the framed protocol, peer authentication, process-group ownership, bounded cleanup, and the `Job` contract are all indifferent to which brew verb runs. The single seam that produces the argv is already a package-level test seam in `internal/uninstall`. Generalisation is therefore a signature change plus a rename, not a redesign of anything in sections 10, 11, or 13.
+
+### `internal/brew`: one more verb through the same seam
+
+`PrepareUninstall(env, pkg)` becomes `PrepareCommand(env, op, pkg)` with:
+
+```go
+type Operation uint8
+
+const (
+    Uninstall Operation = iota
+    Upgrade
+)
+
+func PrepareCommand(env []string, op Operation, pkg Package) (ResolvedCommand, error)
+```
+
+Two argv rows join the section 5 table:
+
+| Operation | Kind | argv |
+|---|---|---|
+| Upgrade | cask | `brew`, `upgrade`, `--cask`, `<confirmed-name>` |
+| Upgrade | formula | `brew`, `upgrade`, `--formula`, `<confirmed-name>` |
+
+The section 12 rule is restated **stronger**, not weakened: no second package validator, **command** argv builder, executable resolver, or command-failure mapper may exist. Dropping the word "uninstall" widens the rule's scope while keeping it singular — one validator, one resolver, one argv builder, one failure mapper, now covering two verbs. The unsafe-name rejection text becomes per-operation, `Unsafe package name; uninstall refused` or `Unsafe package name; upgrade refused`, and still starts no process.
+
+### `internal/uninstall` → `internal/privileged`
+
+The package is renamed, because a package named for one verb cannot honestly own two:
+
+- `internal/uninstall` → `internal/privileged`; the section 12 planned-file list becomes `internal/privileged/privileged.go`, `internal/privileged/protocol.go`, `internal/privileged/peer_darwin.go`, `internal/privileged/*_test.go`, replacing the four `internal/uninstall/*` entries.
+- `Uninstaller` → `Runner`; `Start(ctx, pkg)` → `Start(ctx, brew.Operation, brew.Package)`, with the operation passed straight through to the existing prepare seam.
+- Three error strings lose the verb: `Could not start uninstall: %w` → `Could not start %s: %w`; `fatal uninstall cleanup failure` → `fatal cleanup failure`; `uninstall workers did not stop before cleanup deadline` → `workers did not stop before cleanup deadline`.
+- Nothing else in the package changes. `Job`, `Event`, `Result`, `RequestID`, the helper dispatch, and every invariant in sections 10, 11, and 13 are untouched.
+
+The rename and the signature change must land in the **same** increment, so no half-generalised state ships. The rename touches every file of a security-critical package, which makes silently dropping a test file or one of its package-level `var` test seams the highest-consequence mistake available in this repository: a seam that stops being overridden still compiles, still vets, and still passes. The increment must therefore verify, file by file, that every test file and every seam survives with the same override sites.
+
+### `internal/ui`: the actual cost
+
+The model gains the operation alongside its existing snapshot, and about ten SPEC-pinned strings become per-operation:
+
+| Uninstall (pinned today) | Upgrade (to be pinned) |
+|---|---|
+| `Confirm uninstall` | `Confirm upgrade` |
+| `Uninstall <name>?` | `Upgrade <name>?` |
+| `Uninstalling <name>...` | `Upgrading <name>...` |
+| `Uninstall in progress;` / `controls disabled` | `Upgrade in progress;` / `controls disabled` |
+| `Uninstalled <name>` | `Upgraded <name>` |
+| `Uninstall cancelled` | `Upgrade cancelled` |
+| `Uninstall cleanup failed: <error>` | `Upgrade cleanup failed: <error>` |
+| `Terminal too small; uninstall cancelled` | `Terminal too small; upgrade cancelled` |
+| `Could not start uninstall` | `Could not start upgrade` |
+
+`Cancelling <name>...`, `Widen terminal to confirm`, `Administrator authentication failed`, and `Administrator authentication timed out` are shared and unchanged. The lowercase-`y`-only confirmation discipline is reused verbatim and must never be re-derived. The fit check that guards the confirmation and password dialogs must measure the longest of **both** verb sets, so a terminal wide enough to confirm one verb cannot be too narrow to render the other mid-operation.
+
+Key `g` starts an upgrade. The footer becomes `[/ or s] search  tab switch  u uninstall  g upgrade  t theme  r refresh  q quit`, with `g upgrade` immediately after `u uninstall`. That changes the section 6 exact 30-cell prefix at width 32 only if the new key is inserted before cell 30; it is not — `g upgrade` sits after `u uninstall`, so the 30-cell prefix `[/ or s] search  tab switch  u` is unchanged.
+
+`g` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the non-priority status `<name> is up to date`. The destructive machinery stays unreachable for an operation that would be a no-op, and the freshness cell from section 6 is exactly the affordance that tells the user which rows `g` will act on.
+
+### The third cache-invalidation site
+
+A committed upgrade reloads the active list exactly as a committed uninstall does, and must drop both caches. Section 8's "at exactly the two sites" therefore becomes three sites when this section is implemented; the sentence must be amended in the same increment rather than left stale. The pairing rule is unchanged and is what makes the third site safe: an upgrade changes both what `brew list` prints and what `brew info` prints, and the section 6 outdated marks are baked into the cached panel text, so dropping one cache without the other would leave a stale `↑` beside a fresh panel.
+
+### Why this is deferred rather than shipped
+
+The `internal/brew` and `internal/privileged` work above is cheap and low-risk. Shipping only that would leave a generalised seam with a single caller — a speculative abstraction by this repository's own rules, and therefore worse than shipping neither half.
+
+The cost is the `internal/ui` half: a near-clone of the confirmation → start → progress → password → completion → reload state machine, every string of which is pinned by this document, so each new string must be invented, reviewed, and pinned; plus the fit check re-measured across both verb sets; plus the third invalidation site; plus a roughly doubled section 9/10/11 verification matrix; plus re-pointing the capability-gated real-`sudo` positive test at `brew upgrade`, which — unlike `brew uninstall` against a fixture tree — mutates a package the test cannot restore. Item 1 of this feature, shipped and driven, plus this design is the better trade than a rushed clone of a security-adjacent state machine.
 
 ## 10. On-demand administrator password and retry
 
@@ -625,6 +755,7 @@ Interface consumed by UI/info:
 ```go
 type Homebrew interface {
     List(context.Context, Kind) ([]Package, error)
+    Outdated(context.Context, Kind) ([]string, error) // [REWRITE ADDITION]
     Info(context.Context, Package) (string, error)
     Uses(context.Context, Package) ([]string, error) // [REWRITE ADDITION]
 }
@@ -639,6 +770,8 @@ func MapCommandFailure(runErr error, stdout, stderr []byte) error
 ```
 
 `PrepareUninstall` is the narrow uninstall boundary: it applies the same package-name validator used by `Info`, resolves `brew` through `PATH` in the supplied canonical child environment, and returns only the resolved executable plus arguments exactly equal to the uninstall table after `brew`. `MapCommandFailure` implements the single lookup/start/nonzero-exit mapping in section 5; it returns nil for a nil run error. The real adapter and uninstall module both use these functions. No second package validator, uninstall argv builder, executable resolver, or command-failure mapper may exist.
+
+**[REWRITE ADDITION]** `Outdated` is a plain read on the same seam: it reuses the one kind-flag table, the one `run` helper, the one name parser, and `MapCommandFailure`, and adds no validator because it passes no package value. A missing `brew` reported through `Outdated` must produce the same exact text as through `List`, `Info`, or `PrepareUninstall`.
 
 The real adapter hides process execution/reaping, stdout/stderr capture, list parsing, and UI-facing calls. `internal/uninstall` alone adds the canonical askpass environment, process-group ownership, broker, and cleanup to the prepared command; the brew seam does not expose arbitrary commands. A fake adapter supplies deterministic lists/info/errors in model and loader tests.
 
@@ -771,19 +904,20 @@ Parity and rewrite are complete only when all of the following are true:
 18. Cancel, resize failure, interrupt, quit, and runtime fallback `Wait`-reap the directly owned brew/list/info children exactly once, join/close owned goroutines/descriptors, boundedly signal and observe known uninstall descendants, and report explicit cleanup failure for survivors or uninspectable state.
 19. The four module seams are tested through fake adapters/jobs, and real integration tests cross the same interfaces rather than reaching into implementation internals.
 20. Python source, tests, bytecode, and cancelled askpass experiments are deleted in the same clean cutover.
+21. **[REWRITE ADDITION]** Outdated marking is sourced only from `brew outdated` per kind, never with `--greedy` and never from a version comparison; appears identically in the list row's freshness cell and the info panel's `Version` row; rides the retained list across a cached kind switch without starting a command; is wholly absent when the outdated read fails, without failing or unretaining the load; and never renders `(up to date)` for a package Homebrew reports as outdated.
 
 ## 17. Verification matrix
 
 | Area | Required verification | Observable pass condition |
 |---|---|---|
-| Command vectors | Table-driven unit tests for both kinds and list/info/uninstall, including unsafe names. | Exact argv equality; shell path is never used; unsafe info/uninstall text is exact and no process starts. |
+| Command vectors | Table-driven unit tests for both kinds and list/info/uninstall/outdated, including unsafe names. **[REWRITE ADDITION]** The outdated cases assert both vectors and that `--greedy` never appears, and that an invalid kind starts no process. | Exact argv equality; shell path is never used; unsafe info/uninstall text is exact and no process starts; the outdated vectors are exactly `outdated --cask --quiet` and `outdated --formula --quiet`. |
 | Parsing/errors | Unit tests for blank lines, empty/multiple versions, missing brew, generic spawn error, stderr/stdout/fallback exit errors, and shared preparation/mapping calls. | Results and strings exactly match sections 3 and 5; uninstall has no duplicate validator, argv builder, resolver, or failure mapper. |
 | Keys/modes | Bubble Tea model tests send every listed key/message plus representative unlisted keys in every mode, including `KeyBackspace`, separately delivered `ctrl+h`, physical `KeyDelete`, and `tea.PasteMsg`. | Exact transition tables; `y` confirms, `Y` cancels, search/password steal global letters, loading modes supervise `q`, progress/reload ignore controls, physical Delete and password paste are ignored. |
 | Filtering/selection | Model tests edit/accept/cancel queries, switch kinds, reload shorter/empty lists, and resize viewports. | Source-order substring results and all indices/offsets remain valid. |
-| Layout | Golden or structural view tests at 31×8, 32×9, 71×N, 72×N, narrow names, long names, long status, and multiline info. | Minimum-size message, split threshold, clipping, wrapping, status, and no border/divider overwrite; at width 32 the ANSI-stripped normal footer is exactly the 30-cell prefix specified in section 6. |
+| Layout | Golden or structural view tests at 31×8, 32×9, 71×N, 72×N, narrow names, long names, long status, and multiline info. **[REWRITE ADDITION]** Plus: an outdated row renders ` >↑ ` and a fresh row ` >  ` at identical total width; the freshness cell is independent of the selection marker; and the measured width of `↑` is asserted to be one cell. | Minimum-size message, split threshold, clipping, wrapping, status, and no border/divider overwrite; at width 32 the ANSI-stripped normal footer is exactly the 30-cell prefix specified in section 6; every row is exactly the terminal width at 32, 72, and 120 columns with marked and unmarked rows both on screen, and the section 6 name-column counts hold. |
 | Themes | View tests for cycle order and every role; no-color rendering test. | Exact table values; Lazygit selected row not bold with color; reverse+bold without color. |
 | Latest-only info | Controlled fake load function completes active/pending requests in adversarial order, including completed-not-handled revisit, refresh during flight, and A active → B pending → A reselected. | One active/one latest pending; current-generation cache only; stale result never renders/caches; after A completes in the A→B→A case, B never starts. |
-| Refresh/list loading | Model plus fake Homebrew tests cover every section 8 row, success/error, filtered query, fewer rows, and in-flight old info. | Exact status/footer/key behavior, cache invalidation, list/status result, selection clamp, and fresh info request. |
+| Refresh/list loading | Model plus fake Homebrew tests cover every section 8 row, success/error, filtered query, fewer rows, and in-flight old info. **[REWRITE ADDITION]** Plus: marks survive a cached kind switch with no extra list call; a failed outdated read yields a successful, retained, unmarked list; an outdated name the inventory never shows marks nothing. | Exact status/footer/key behavior, cache invalidation, list/status result, selection clamp, and fresh info request; marks are on the retained value; a failed outdated read changes neither status nor retention. |
 | Confirmation | Model/view tests for no selection, immutable snapshot, all ordinary keys, long package names, and shrink while open. | No command without fitting exact lowercase `y`; centered dialog; safe cancellation strings. |
 | Uninstall start/progress/result | Run the `tea.Cmd` returned by a fake model transition for setup success/failure, command failure, success+reload success/failure, cancel, cleanup failure, and duplicate events. The fake `Start` asserts starting state and spinner were committed before invocation and that `Start` was not called by `Update`. | One nonblocking start transition and one job/result; listener/setup precedes child start; no premature success; exact progress/reload/final status and cleanup-failure precedence. |
 | Askpass helper/core limit | Subprocess tests invoke both normal and helper dispatch with inspectable/injected limit setters, duplicate/malformed metadata cases, and a test broker. | Both paths establish `RLIMIT_CORE=0` before their specified boundaries; failure refuses password input/connect; duplicate or malformed metadata is rejected silently; no TUI/TTY check runs in helper mode; exact stdout newline appears only on success; retry starts empty. |

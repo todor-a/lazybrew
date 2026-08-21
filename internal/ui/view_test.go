@@ -196,7 +196,8 @@ func TestColorProfileClassificationAndNoColor(t *testing.T) {
 		got := m.packageLine(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask}, true, 40)
 		plain := ansiSequence.ReplaceAllString(got, "")
 		want := lipgloss.NewStyle().Reverse(true).Bold(true).Render(plain)
-		if got != want || !strings.Contains(plain, "> Alpha") {
+		// ">  Alpha": marker, the blank freshness cell, then the name column.
+		if got != want || !strings.Contains(plain, ">  Alpha") {
 			t.Fatalf("ASCII selection=%q, want reverse+bold %q", got, want)
 		}
 	})
@@ -384,6 +385,38 @@ func TestScrollbarThumbSitsFlushAtBothEnds(t *testing.T) {
 	}
 }
 
+func TestOutdatedRowCarriesAFixedFreshnessCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	plain := func(pkg brew.Package, selected bool) string {
+		return ansiSequence.ReplaceAllString(m.packageLine(pkg, selected, 40), "")
+	}
+	stale := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Outdated: true}, true)
+	fresh := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask}, true)
+	if !strings.HasPrefix(stale, " >↑ Alpha") {
+		t.Fatalf("outdated row=%q, want a marker then the ↑ cell", stale)
+	}
+	if !strings.HasPrefix(fresh, " >  Alpha") {
+		t.Fatalf("fresh row=%q, want a marker then a blank cell", fresh)
+	}
+	if lipgloss.Width(stale) != 40 || lipgloss.Width(fresh) != 40 {
+		t.Fatalf("row widths=%d and %d, want 40 each", lipgloss.Width(stale), lipgloss.Width(fresh))
+	}
+
+	unselected := plain(brew.Package{Name: "Alpha", Kind: brew.Cask, Outdated: true}, false)
+	if !strings.HasPrefix(unselected, "  ↑ Alpha") {
+		t.Fatalf("unselected outdated row=%q, want the cell independent of the marker", unselected)
+	}
+}
+
+// The freshness cell is one terminal cell wide by assumption, and every pinned
+// row width depends on it. A lipgloss bump that changed its measured width would
+// otherwise shift every row at runtime with no test noticing.
+func TestOutdatedGlyphIsOneCell(t *testing.T) {
+	if got := lipgloss.Width("↑"); got != 1 {
+		t.Fatalf("lipgloss.Width(\"↑\")=%d, want 1", got)
+	}
+}
+
 func TestScrollbarNeverChangesTheRenderedWidth(t *testing.T) {
 	m, _ := newTestModel(t)
 	for _, size := range []tea.WindowSizeMsg{
@@ -398,4 +431,73 @@ func TestScrollbarNeverChangesTheRenderedWidth(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The name-column arithmetic in packageLine decides where the kind column lands.
+// Nothing else pinned it: fit() pads every row to the pane width unconditionally,
+// so an off-by-one there only shifts the kind column and eats one name character,
+// which no width assertion can see. These indices are written out rather than
+// recomputed from the formula, so the test disagrees with the code when the code
+// changes.
+func TestPackageRowKindColumnLandsAtAFixedCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	for _, tt := range []struct {
+		name      string
+		pkg       brew.Package
+		width     int
+		wantIndex int
+	}{
+		{"cask at 20", brew.Package{Name: "alpha", Kind: brew.Cask}, 20, 16},
+		{"cask at 32", brew.Package{Name: "alpha", Kind: brew.Cask}, 32, 28},
+		{"cask at 40", brew.Package{Name: "alpha", Kind: brew.Cask}, 40, 35},
+		{"cask at 72", brew.Package{Name: "alpha", Kind: brew.Cask}, 72, 35},
+		{"formula at 32", brew.Package{Name: "alpha", Kind: brew.Formula}, 32, 25},
+		{"formula at 40", brew.Package{Name: "alpha", Kind: brew.Formula}, 40, 33},
+		{"long name at 40", brew.Package{Name: strings.Repeat("x", 60), Kind: brew.Cask}, 40, 35},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := ansiSequence.ReplaceAllString(m.packageLine(tt.pkg, false, tt.width), "")
+			if got := lipgloss.Width(plain); got != tt.width {
+				t.Fatalf("row width = %d, want %d: %q", got, tt.width, plain)
+			}
+			kind := string(tt.pkg.Kind)
+			got := cellIndex(plain, kind)
+			if got != tt.wantIndex {
+				t.Fatalf("kind column at cell %d, want %d: %q", got, tt.wantIndex, plain)
+			}
+		})
+	}
+}
+
+// The freshness cell is fixed-width whether or not it is marked, so a marked row
+// cannot shift the columns of its neighbours.
+func TestOutdatedMarkerDoesNotShiftTheRow(t *testing.T) {
+	m, _ := newTestModel(t)
+	fresh := brew.Package{Name: "alpha", Kind: brew.Cask}
+	stale := brew.Package{Name: "alpha", Kind: brew.Cask, Outdated: true}
+
+	plainOf := func(p brew.Package) string {
+		return ansiSequence.ReplaceAllString(m.packageLine(p, false, 40), "")
+	}
+	a, b := plainOf(fresh), plainOf(stale)
+	if cellIndex(a, "cask") != cellIndex(b, "cask") {
+		t.Fatalf("marker moved the kind column:\n fresh %q\n stale %q", a, b)
+	}
+	if lipgloss.Width(a) != lipgloss.Width(b) {
+		t.Fatalf("marker changed the row width: %d vs %d", lipgloss.Width(a), lipgloss.Width(b))
+	}
+	if !strings.Contains(b, "↑") || strings.Contains(a, "↑") {
+		t.Fatalf("marker not applied exactly to the outdated row:\n fresh %q\n stale %q", a, b)
+	}
+}
+
+// cellIndex reports where needle starts in display cells, not bytes. The outdated
+// marker is multi-byte, so a byte offset reports a column shift on a marked row
+// whose columns are in fact identical.
+func cellIndex(haystack, needle string) int {
+	at := strings.Index(haystack, needle)
+	if at < 0 {
+		return -1
+	}
+	return lipgloss.Width(haystack[:at])
 }

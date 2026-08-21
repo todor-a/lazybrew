@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,8 @@ import (
 
 type fakeHomebrew struct {
 	packages    map[brew.Kind][]brew.Package
+	outdated    map[brew.Kind][]string
+	outdatedErr error
 	err         error
 	listStarted chan struct{}
 	listCalls   map[brew.Kind]int
@@ -38,6 +41,13 @@ func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package
 	packages := f.packages[kind]
 	copyOfPackages := append([]brew.Package(nil), packages...)
 	return copyOfPackages, nil
+}
+
+func (f *fakeHomebrew) Outdated(_ context.Context, kind brew.Kind) ([]string, error) {
+	if f.outdatedErr != nil {
+		return nil, f.outdatedErr
+	}
+	return append([]string(nil), f.outdated[kind]...), nil
 }
 
 func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
@@ -858,6 +868,79 @@ func drainList(t *testing.T, m *model, command tea.Cmd) {
 				m.Update(result)
 			}
 		}
+	}
+}
+
+func TestOutdatedMarksRideTheListCacheAcrossASwitch(t *testing.T) {
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {
+				{Name: "Alpha", Version: "1.0", Kind: brew.Cask},
+				{Name: "Beta", Version: "2.0", Kind: brew.Cask},
+			},
+			brew.Formula: {{Name: "zlib", Version: "1.3", Kind: brew.Formula}},
+		},
+		// "Beta" is the only visible cask reported; "ghostwriter" is a name the
+		// inventory never shows, as `brew outdated --formula` legitimately reports
+		// dependency-only formulae the list filters out.
+		outdated: map[brew.Kind][]string{brew.Cask: {"Beta", "ghostwriter"}},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	marks := func() []bool {
+		var got []bool
+		for _, item := range m.list.Items() {
+			got = append(got, item.(packageItem).packageValue.Outdated)
+		}
+		return got
+	}
+	if got := marks(); !slices.Equal(got, []bool{false, true}) {
+		t.Fatalf("startup marks=%v, want only Beta marked", got)
+	}
+
+	drainList(t, m, m.switchKind())
+	if got := marks(); !slices.Equal(got, []bool{false}) {
+		t.Fatalf("formula marks=%v, want none", got)
+	}
+
+	// The cached switch starts no command, so the marks must already be on the
+	// retained slice rather than fetched again.
+	drainList(t, m, m.switchKind())
+	if got := homebrew.listCalls[brew.Cask]; got != 1 {
+		t.Fatalf("cached switch re-shelled: cask list calls=%d, want 1", got)
+	}
+	if got := marks(); !slices.Equal(got, []bool{false, true}) {
+		t.Fatalf("cached marks=%v, want only Beta marked", got)
+	}
+}
+
+func TestAFailedOutdatedReadStillLoadsAnUnmarkedList(t *testing.T) {
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
+		},
+		outdated:    map[brew.Kind][]string{brew.Cask: {"Alpha"}},
+		outdatedErr: errors.New("brew outdated exploded"),
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	if m.loading || m.status != "" {
+		t.Fatalf("a failed outdated read broke the load: loading=%v status=%q", m.loading, m.status)
+	}
+	if got := len(m.list.Items()); got != 1 {
+		t.Fatalf("list has %d items, want 1", got)
+	}
+	if m.list.Items()[0].(packageItem).packageValue.Outdated {
+		t.Fatal("a failed outdated read produced a mark")
+	}
+	if _, ok := m.listCache[brew.Cask]; !ok {
+		t.Fatal("a failed outdated read poisoned list retention")
 	}
 }
 

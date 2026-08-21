@@ -40,6 +40,11 @@ func TestMain(m *testing.M) {
 		if err := os.WriteFile(path, []byte(strings.Join(os.Args[1:], "\x00")), 0o600); err != nil {
 			os.Exit(98)
 		}
+		// Recorded beside the argv so a test can assert what the child actually
+		// inherited, not merely what the parent believes it set.
+		if err := os.WriteFile(path+".autoupdate", []byte(os.Getenv("HOMEBREW_NO_AUTO_UPDATE")), 0o600); err != nil {
+			os.Exit(96)
+		}
 	}
 	if path := os.Getenv(helperPIDEnv); path != "" {
 		if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
@@ -168,6 +173,13 @@ func TestMissingBrewErrors(t *testing.T) {
 			name: "list",
 			run: func() error {
 				_, err := New().List(context.Background(), Cask)
+				return err
+			},
+		},
+		{
+			name: "outdated",
+			run: func() error {
+				_, err := New().Outdated(context.Background(), Cask)
 				return err
 			},
 		},
@@ -344,6 +356,17 @@ func mustExecutable(t *testing.T) string {
 	return executable
 }
 
+func assertArgAbsent(t *testing.T, path, unwanted string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	if slices.Contains(strings.Split(string(data), "\x00"), unwanted) {
+		t.Fatalf("argv contains %q, which it must never carry", unwanted)
+	}
+}
+
 func assertRecordedArgs(t *testing.T, path string, want []string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -392,4 +415,44 @@ func waitForHelperPID(t *testing.T, path string) int {
 	}
 	t.Fatalf("helper did not write PID to %s", path)
 	return 0
+}
+
+// Homebrew auto-updates on install, outdated, upgrade, bundle, and release unless
+// HOMEBREW_NO_AUTO_UPDATE is set, which would run a network fetch that mutates the
+// local installation before the requested command, inside the load that gates
+// first paint, and would put its stdout report into the buffer this package
+// parses. Assert against what the child inherited rather than what run() set.
+func TestReadsSuppressHomebrewAutoUpdateInTheChildEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"list", func() error { _, err := New().List(context.Background(), Cask); return err }},
+		{"info", func() error {
+			_, err := New().Info(context.Background(), Package{Name: "go", Kind: Formula})
+			return err
+		}},
+		{"uses", func() error {
+			_, err := New().Uses(context.Background(), Package{Name: "go", Kind: Formula})
+			return err
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := configureFakeBrew(t, "", "", 0, false)
+			// Set to the Homebrew default so a pass cannot come from the ambient
+			// environment: this machine's shell exports HOMEBREW_NO_AUTO_UPDATE=1,
+			// which is exactly how the hazard stayed invisible during development.
+			t.Setenv("HOMEBREW_NO_AUTO_UPDATE", "")
+			if err := tt.call(); err != nil {
+				t.Fatalf("call error = %v", err)
+			}
+			got, err := os.ReadFile(argsFile + ".autoupdate")
+			if err != nil {
+				t.Fatalf("child did not record its environment: %v", err)
+			}
+			if string(got) != "1" {
+				t.Fatalf("child HOMEBREW_NO_AUTO_UPDATE = %q, want \"1\"", got)
+			}
+		})
+	}
 }

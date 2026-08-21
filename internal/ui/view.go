@@ -194,10 +194,19 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if selected {
 		marker = ">"
 	}
+	// One fixed cell for Homebrew's outdated verdict, immediately after the
+	// selection marker so it cannot be clipped away in the narrow layout where
+	// the list is the only pane. A glyph rather than a color, for the same reason
+	// the scrollbar thumb is one: the cue has to survive a monochrome theme. It
+	// sits inside the row string, so it inherits the selected-row style.
+	freshness := " "
+	if pkg.Outdated {
+		freshness = "↑"
+	}
 	kind := string(pkg.Kind)
-	nameWidth := min(30, max(8, width-4-lipgloss.Width(kind)))
+	nameWidth := min(30, max(8, width-5-lipgloss.Width(kind)))
 	name := fit(pkg.Name, nameWidth)
-	line := " " + marker + " " + name + " " + kind
+	line := " " + marker + freshness + " " + name + " " + kind
 	if pkg.Version != "" {
 		line += " " + pkg.Version
 	}
