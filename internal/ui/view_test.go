@@ -414,6 +414,169 @@ func TestOutdatedRowCarriesAFixedFreshnessCell(t *testing.T) {
 func TestOutdatedGlyphIsOneCell(t *testing.T) {
 	if got := lipgloss.Width("↑"); got != 1 {
 		t.Fatalf("lipgloss.Width(\"↑\")=%d, want 1", got)
+func TestFooterListsEveryNormalKey(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	lines := strippedLines(m)
+	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
+	want := "[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit"
+	if footer != want {
+		t.Fatalf("footer=%q, want %q", footer, want)
+	}
+}
+
+// The size column is reserved before the measurement lands, so the name and
+// origin columns sit at the same cells either way and nothing reflows when sizes
+// arrive seconds after first paint.
+func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
+	m, _ := newTestModel(t)
+	for _, width := range []int{32, 72, 120} {
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
+		measured := strippedLines(m)[3]
+
+		landed := m.sizes
+		m.sizes = nil
+		blank := strippedLines(m)[3]
+		m.sizes = landed
+
+		if lipgloss.Width(measured) != lipgloss.Width(blank) {
+			t.Fatalf("at width %d the row changed width when sizes landed: %q vs %q", width, blank, measured)
+		}
+		if index := strings.Index(blank, "cask"); index < 0 || index != strings.Index(measured, "cask") {
+			t.Fatalf("at width %d the origin column moved when sizes landed: %q vs %q", width, blank, measured)
+		}
+		if !strings.Contains(measured, "1MB") {
+			t.Fatalf("at width %d the measured row carries no size: %q", width, measured)
+		}
+		if strings.ContainsAny(strings.TrimRight(blank, " │"), "KMG") {
+			t.Fatalf("at width %d the unmeasured row invented a size: %q", width, blank)
+		}
+	}
+}
+
+func TestRowShapeAndNameColumnBounds(t *testing.T) {
+	m, _ := newTestModel(t)
+	tests := []struct {
+		name  string
+		pkg   brew.Package
+		width int
+		want  string
+	}{
+		{
+			name:  "cask row",
+			pkg:   brew.Package{Name: "Alpha", Kind: brew.Cask},
+			width: 40,
+			want:  "   Alpha                     cask       ",
+		},
+		{
+			name:  "on-request formula",
+			pkg:   brew.Package{Name: "vault", Kind: brew.Formula},
+			width: 40,
+			want:  "   vault                  formula       ",
+		},
+		{
+			name:  "dependency formula carries dep in the origin column",
+			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
+			width: 40,
+			want:  "   llvm@22                dep           ",
+		},
+		{
+			// 32-column narrow layout with a scrollbar: the tightest supported row.
+			name:  "narrowest supported row keeps the pinned name minimum",
+			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
+			width: 29,
+			want:  "   llvm@22     dep           ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.sizes = nil
+			got := ansiSequence.ReplaceAllString(m.packageLine(tt.pkg, false, tt.width), "")
+			if got != tt.want {
+				t.Fatalf("row=%q, want %q", got, tt.want)
+			}
+			if lipgloss.Width(got) != tt.width {
+				t.Fatalf("row width=%d, want %d", lipgloss.Width(got), tt.width)
+			}
+		})
+	}
+}
+
+func TestHeaderCarriesTheFleetTotalWithoutDisturbingTheTabBar(t *testing.T) {
+	m, _ := newTestModel(t)
+	for _, width := range []int{32, 72, 120} {
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
+		header := strippedLines(m)[1]
+		if lipgloss.Width(header) != width {
+			t.Fatalf("at width %d header width=%d", width, lipgloss.Width(header))
+		}
+		if !strings.Contains(header, "[ Apps ]    Formulae") {
+			t.Fatalf("at width %d the tab bar was disturbed: %q", width, header)
+		}
+		// Right aligned against the interior edge, so it reads as the column's sum.
+		if !strings.HasSuffix(header, "11.4GB│") {
+			t.Fatalf("at width %d the total is not flush right: %q", width, header)
+		}
+	}
+
+	m.sizes = nil
+	header := strippedLines(m)[1]
+	if strings.Contains(header, "GB") {
+		t.Fatalf("header claimed a total before measuring: %q", header)
+	}
+	if lipgloss.Width(header) != 120 {
+		t.Fatalf("unmeasured header width=%d, want 120", lipgloss.Width(header))
+	}
+}
+
+// At the minimum supported width the total still fits: 22 cells of tab bar, one
+// gap, and at most 6 cells of value inside a 30-cell interior. Narrower than
+// that the value is omitted rather than clipped, so it can never eat into the
+// tab bar's pinned cell slots.
+func TestTotalFitsTheMinimumInteriorAndIsOtherwiseOmitted(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 32, Height: 9})
+	if got := m.headerLine(); got != "[ Apps ]    Formulae    11.4GB" {
+		t.Fatalf("header at the minimum width=%q, want the total still shown", got)
+	}
+
+	m.width = 24
+	if got := m.headerLine(); got != activeListLabel(m.kind) {
+		t.Fatalf("header=%q, want the bare tab bar when the total cannot fit", got)
+	}
+}
+
+func TestHumanKBSpellingAndSixCellCeiling(t *testing.T) {
+	tests := []struct {
+		kilobytes int64
+		want      string
+	}{
+		{kilobytes: 0, want: "0KB"},
+		{kilobytes: 12, want: "12KB"},
+		{kilobytes: 1023, want: "1023KB"},
+		{kilobytes: 1024, want: "1MB"},
+		{kilobytes: 48568, want: "47MB"},
+		{kilobytes: 1048576, want: "1.0GB"},
+		{kilobytes: 1550732, want: "1.5GB"},
+		{kilobytes: 11902796, want: "11.4GB"},
+		{kilobytes: 104857600, want: "100GB"},
+		{kilobytes: -1, want: ""},
+	}
+	for _, tt := range tests {
+		got := humanKB(tt.kilobytes)
+		if got != tt.want {
+			t.Errorf("humanKB(%d) = %q, want %q", tt.kilobytes, got, tt.want)
+		}
+		if lipgloss.Width(got) > 6 {
+			t.Errorf("humanKB(%d) = %q, wider than the reserved 6 cells", tt.kilobytes, got)
+		}
+	}
+
+	// The 6-cell ceiling holds below 10 TB, which is already past where the
+	// decimal is dropped. Beyond that the value widens, and the header omits it
+	// rather than clipping the tab bar.
+	if got := humanKB(10736369664); got != "10239GB" {
+		t.Errorf("humanKB(10736369664) = %q, want %q", got, "10239GB")
 	}
 }
 
@@ -422,13 +585,23 @@ func TestScrollbarNeverChangesTheRenderedWidth(t *testing.T) {
 	for _, size := range []tea.WindowSizeMsg{
 		{Width: 32, Height: 9}, {Width: 40, Height: 9},
 		{Width: 71, Height: 10}, {Width: 72, Height: 10}, {Width: 80, Height: 9},
+		{Width: 120, Height: 40},
 	} {
-		m.Update(size)
-		for row, line := range strippedLines(m) {
-			if got := lipgloss.Width(line); got != size.Width {
-				t.Fatalf("at %dx%d row %d width=%d, want %d: %q",
-					size.Width, size.Height, row, got, size.Width, line)
+		// Both size states, because the size column is reserved before the
+		// measurement lands and filled afterwards.
+		for _, measured := range []bool{true, false} {
+			landed := m.sizes
+			if !measured {
+				m.sizes = nil
 			}
+			m.Update(size)
+			for row, line := range strippedLines(m) {
+				if got := lipgloss.Width(line); got != size.Width {
+					t.Fatalf("at %dx%d measured=%v row %d width=%d, want %d: %q",
+						size.Width, size.Height, measured, row, got, size.Width, line)
+				}
+			}
+			m.sizes = landed
 		}
 	}
 }

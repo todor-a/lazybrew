@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/help"
@@ -54,7 +55,67 @@ func (m *model) baseView() string {
 	return border.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
-func (m *model) headerLine() string { return activeListLabel(m.kind) }
+// headerLine carries the tab bar and, once measured, the fleet total right
+// aligned against the interior edge.
+//
+// It goes here rather than in the status row because the status row already
+// carries query, count, and errors and is the first thing clipped at 32 columns,
+// while this row holds a 22-cell label. The value is bare, with no label, because
+// 22 + 1 + 6 fits the 30-cell minimum interior and a labelled form does not; it
+// uses the same glyphs as the row column, so it reads as that column's sum.
+//
+// It reports the whole fleet, not the visible subset: that is the number the
+// question asks for, and it does not flicker as the query or the dependency
+// toggle changes. It is omitted rather than clipped when it will not fit, so it
+// can never disturb the tab bar's pinned cell slots.
+func (m *model) headerLine() string {
+	label := activeListLabel(m.kind)
+	if m.sizes == nil {
+		return label
+	}
+	total := humanKB(m.sizes.Total)
+	gap := m.width - 2 - lipgloss.Width(label) - lipgloss.Width(total)
+	if gap < 1 {
+		return label
+	}
+	return label + strings.Repeat(" ", gap) + total
+}
+
+// rowSize is blank until the pass lands and for any package it did not measure,
+// so a moved root or a Homebrew layout change renders an empty column rather
+// than a wrong number.
+func (m *model) rowSize(pkg brew.Package) string {
+	if m.sizes == nil {
+		return ""
+	}
+	kilobytes, ok := m.sizes.KB(pkg.Kind, pkg.Name)
+	if !ok {
+		return ""
+	}
+	return humanKB(kilobytes)
+}
+
+// humanKB spells a size the way Homebrew's own info output does, so the row
+// column and the info pane agree. It never exceeds 6 cells below 10 TB: the
+// decimal is dropped from 100 GB up, where it would otherwise overflow.
+func humanKB(kilobytes int64) string {
+	switch {
+	case kilobytes < 0:
+		return ""
+	case kilobytes < 1024:
+		return strconv.FormatInt(kilobytes, 10) + "KB"
+	case kilobytes < 1024*1024:
+		return strconv.FormatInt((kilobytes+512)/1024, 10) + "MB"
+	case kilobytes < 100*1024*1024:
+		return strconv.FormatFloat(float64(kilobytes)/(1024*1024), 'f', 1, 64) + "GB"
+	default:
+		return strconv.FormatInt((kilobytes+512*1024)/(1024*1024), 10) + "GB"
+	}
+}
+
+func padLeft(value string, width int) string {
+	return strings.Repeat(" ", max(0, width-lipgloss.Width(value))) + value
+}
 
 // activeListLabel names both lists and brackets the active one. Brackets rather
 // than a ">" marker: ">" is what the list uses for its selected row, and
@@ -189,6 +250,27 @@ func (m *model) scrollbarColumn(height, totalPages, page int) []string {
 	return column
 }
 
+// originColumn repurposes the old kind column. In a single-kind list that column
+// was a constant, so carrying `dep` there costs no width and turns a constant
+// into the dependency marker. It is fixed-width per list rather than per row, so
+// the name column cannot shift between rows. Text, not color, per the monochrome
+// precedent the tab bar already sets.
+func originColumn(pkg brew.Package) string {
+	if pkg.Kind != brew.Formula {
+		return string(pkg.Kind)
+	}
+	if pkg.Dependency {
+		return "dep    "
+	}
+	return "formula"
+}
+
+// sizeColumnWidth is one space plus six right-aligned cells. It is reserved as
+// soon as the name column can still hold its pinned minimum, and rendered blank
+// until the size pass lands, so the name column never reflows when sizes arrive
+// seconds after first paint.
+const sizeColumnWidth = 7
+
 func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	marker := " "
 	if selected {
@@ -201,14 +283,23 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	// sits inside the row string, so it inherits the selected-row style.
 	freshness := " "
 	if pkg.Outdated {
-		freshness = "↑"
+		freshness = "\u2191"
 	}
-	kind := string(pkg.Kind)
-	nameWidth := min(30, max(8, width-5-lipgloss.Width(kind)))
+	origin := originColumn(pkg)
+	// The size column is reserved only where a size can honestly be measured,
+	// which is the formula list. See rowSize.
+	sizeWidth := 0
+	if m.kind == brew.Formula && width-5-lipgloss.Width(origin)-sizeColumnWidth >= 8 {
+		sizeWidth = sizeColumnWidth
+	}
+	nameWidth := min(30, max(8, width-5-lipgloss.Width(origin)-sizeWidth))
 	name := fit(pkg.Name, nameWidth)
-	line := " " + marker + freshness + " " + name + " " + kind
+	line := " " + marker + freshness + " " + name + " " + origin
 	if pkg.Version != "" {
 		line += " " + pkg.Version
+	}
+	if sizeWidth > 0 {
+		line = fit(line, width-sizeWidth) + " " + padLeft(m.rowSize(pkg), sizeWidth-1)
 	}
 	line = fit(line, width)
 	if !selected {

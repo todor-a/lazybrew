@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,28 @@ type fakeHomebrew struct {
 	listStarted chan struct{}
 	listCalls   map[brew.Kind]int
 	dependents  map[string][]string
+	packages     map[brew.Kind][]brew.Package
+	err          error
+	listStarted  chan struct{}
+	listCalls    map[brew.Kind]int
+	dependents   map[string][]string
+	sizes        brew.Sizes
+	sizesErr     error
+	sizesCalls   int
+	sizesStarted chan struct{}
+}
+
+func (f *fakeHomebrew) Sizes(ctx context.Context) (brew.Sizes, error) {
+	f.sizesCalls++
+	if f.sizesStarted != nil {
+		close(f.sizesStarted)
+		<-ctx.Done()
+		return brew.Sizes{}, ctx.Err()
+	}
+	if f.sizesErr != nil {
+		return brew.Sizes{}, f.sizesErr
+	}
+	return f.sizes, nil
 }
 
 func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package, error) {
@@ -122,13 +145,19 @@ func (j *fakeJob) finish(result uninstall.Result) {
 
 func newTestModel(t *testing.T) (*model, *fakeUninstaller) {
 	t.Helper()
-	homebrew := &fakeHomebrew{packages: map[brew.Kind][]brew.Package{
-		brew.Cask: {
-			{Name: "Alpha", Version: "1.0", Kind: brew.Cask},
-			{Name: "Beta", Version: "2.0", Kind: brew.Cask},
-			{Name: "Gamma", Version: "3.0", Kind: brew.Cask},
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {
+				{Name: "Alpha", Version: "1.0", Kind: brew.Cask},
+				{Name: "Beta", Version: "2.0", Kind: brew.Cask},
+				{Name: "Gamma", Version: "3.0", Kind: brew.Cask},
+			},
 		},
-	}}
+		sizes: brew.Sizes{
+			Cask:  map[string]int64{"Alpha": 1024, "Beta": 5 * 1024 * 1024, "Gamma": 512},
+			Total: 11902796,
+		},
+	}
 	job := newFakeJob()
 	uninstaller := &fakeUninstaller{job: job}
 	loader := info.New(homebrew.Info)
@@ -1031,5 +1060,424 @@ func TestRefreshDropsTheWholeListCache(t *testing.T) {
 	drainList(t, m, m.switchKind())
 	if got := homebrew.listCalls[brew.Formula]; got != 2 {
 		t.Fatalf("switch after refresh served stale cache: formula calls=%d, want 2", got)
+	}
+}
+
+// diskFleet is a formula inventory with dependency rows and a size for each, so
+// the toggle, the sort, and the count are all exercised against one fixture.
+func diskFleet() *fakeHomebrew {
+	return &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {
+				{Name: "Alpha", Kind: brew.Cask},
+				{Name: "Beta", Kind: brew.Cask},
+			},
+			brew.Formula: {
+				{Name: "awscli", Kind: brew.Formula},
+				{Name: "gcc", Kind: brew.Formula, Dependency: true},
+				{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
+				{Name: "vault", Kind: brew.Formula},
+			},
+		},
+		sizes: brew.Sizes{
+			Formula: map[string]int64{
+				"awscli":  202752,
+				"gcc":     488448,
+				"llvm@22": 1550732,
+				"vault":   519248,
+			},
+			Cask:  map[string]int64{"Alpha": 1024, "Beta": 48568},
+			Total: 11902796,
+		},
+	}
+}
+
+func newFleetModel(t *testing.T) (*model, *fakeHomebrew) {
+	t.Helper()
+	homebrew := diskFleet()
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+	if m.loading {
+		t.Fatal("startup list did not complete")
+	}
+	return m, homebrew
+}
+
+func visibleNames(m *model) []string {
+	items := m.list.VisibleItems()
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		names = append(names, item.(packageItem).packageValue.Name)
+	}
+	return names
+}
+
+func TestDependencyToggleServesRetentionAndStartsNoCommand(t *testing.T) {
+	m, homebrew := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	if m.kind != brew.Formula {
+		t.Fatalf("kind=%q, want formula", m.kind)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "vault"}) {
+		t.Fatalf("startup formula rows=%q, want dependencies hidden", got)
+	}
+	if m.showDeps {
+		t.Fatal("dependencies were shown at startup")
+	}
+	listCalls := homebrew.listCalls[brew.Formula]
+
+	m.list.Select(1)
+	m.updateNormal(textKey("d"))
+	// Revealing rows resets the selection, so info retargets the new row 0.
+	if got := m.selectedPackage(); got == nil || got.Name != "awscli" {
+		t.Fatalf("selection after d=%#v, want the reset row 0", got)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "gcc", "llvm@22", "vault"}) {
+		t.Fatalf("rows after d=%q, want every formula in source order", got)
+	}
+	if m.status != "Dependencies: shown" || m.priority {
+		t.Fatalf("status=%q priority=%v, want an ordinary Dependencies: shown", m.status, m.priority)
+	}
+
+	m.updateNormal(textKey("D"))
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "vault"}) {
+		t.Fatalf("rows after D=%q, want dependencies hidden again", got)
+	}
+	if m.status != "Dependencies: hidden" {
+		t.Fatalf("status=%q, want Dependencies: hidden", m.status)
+	}
+	if got := homebrew.listCalls[brew.Formula]; got != listCalls {
+		t.Fatalf("toggling re-shelled brew list: formula calls=%d, want %d", got, listCalls)
+	}
+	if m.loading {
+		t.Fatal("toggling entered a loading state")
+	}
+}
+
+// The retained slice is shared with listCache, so a sort that mutated it in place
+// would corrupt retention and make the toggle non-idempotent.
+func TestTogglingNeverMutatesTheRetainedList(t *testing.T) {
+	m, _ := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	before := append([]brew.Package(nil), m.listCache[brew.Formula]...)
+
+	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("o"))
+	m.updateNormal(textKey("o"))
+	m.updateNormal(textKey("d"))
+
+	if !slices.Equal(m.listCache[brew.Formula], before) {
+		t.Fatalf("retention mutated to %#v, want %#v", m.listCache[brew.Formula], before)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "vault"}) {
+		t.Fatalf("round trip left %q, want the original view", got)
+	}
+}
+
+func TestDependencyToggleOnTheCaskListOnlyReportsStatus(t *testing.T) {
+	m, _ := newFleetModel(t)
+	m.list.Select(1)
+	before := visibleNames(m)
+
+	if command := m.updateNormal(textKey("d")); command != nil {
+		t.Fatal("d re-targeted info on the cask list")
+	}
+	if got := visibleNames(m); !slices.Equal(got, before) {
+		t.Fatalf("cask rows changed to %q, want %q", got, before)
+	}
+	if m.list.Index() != 1 {
+		t.Fatalf("selection moved to %d, want it preserved on the cask list", m.list.Index())
+	}
+	if m.status != "Dependencies: shown" {
+		t.Fatalf("status=%q, want the key to report itself rather than be silently dead", m.status)
+	}
+	drainList(t, m, m.switchKind())
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "gcc", "llvm@22", "vault"}) {
+		t.Fatalf("formula rows after switching=%q, want the requested toggle state", got)
+	}
+}
+
+func TestSizeSortOrdersLargestFirstAndBackToSourceOrder(t *testing.T) {
+	m, _ := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	m.updateNormal(textKey("d"))
+
+	m.updateNormal(textKey("o"))
+	if m.status != "Sort: size" || m.priority {
+		t.Fatalf("status=%q priority=%v, want an ordinary Sort: size", m.status, m.priority)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"llvm@22", "vault", "gcc", "awscli"}) {
+		t.Fatalf("sorted rows=%q, want largest first", got)
+	}
+
+	m.updateNormal(textKey("O"))
+	if m.status != "Sort: name" {
+		t.Fatalf("status=%q, want Sort: name", m.status)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "gcc", "llvm@22", "vault"}) {
+		t.Fatalf("unsorted rows=%q, want source order", got)
+	}
+}
+
+func TestQueryFilterPreservesTheSizeOrder(t *testing.T) {
+	m, _ := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("o"))
+
+	// "c" matches awscli and gcc only; every formula's filter value contains the
+	// kind, so a letter of "formula" would match every row. Source order is
+	// awscli then gcc, so the filtered result proves the size order survived.
+	m.query = "c"
+	m.applyFilter(0)
+	if got := visibleNames(m); !slices.Equal(got, []string{"gcc", "awscli"}) {
+		t.Fatalf("filtered rows=%q, want the sorted order preserved", got)
+	}
+}
+
+func TestSizeSortAppliesWhenTheMeasurementLandsLate(t *testing.T) {
+	m, _ := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	m.updateNormal(textKey("d"))
+	m.sizes = nil
+
+	m.updateNormal(textKey("o"))
+	if !m.sortBySize {
+		t.Fatal("o did not record the requested order")
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "gcc", "llvm@22", "vault"}) {
+		t.Fatalf("rows without a measurement=%q, want source order left alone", got)
+	}
+
+	m.Update(sizesResultMsg{id: m.sizesID, sizes: diskFleet().sizes})
+	if got := visibleNames(m); !slices.Equal(got, []string{"llvm@22", "vault", "gcc", "awscli"}) {
+		t.Fatalf("rows after the measurement landed=%q, want largest first", got)
+	}
+}
+
+func TestInstalledCountFollowsTheDependencyToggle(t *testing.T) {
+	m, _ := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	if got := m.installedStatus(); got != "2 formulae installed" {
+		t.Fatalf("count with dependencies hidden=%q", got)
+	}
+	m.updateNormal(textKey("d"))
+	if got := m.installedStatus(); got != "4 formulae installed" {
+		t.Fatalf("count with dependencies shown=%q", got)
+	}
+}
+
+// The list must be usable before the measurement lands, and the measurement must
+// not drag the list into a loading mode or start the spinner.
+func TestListIsFullyNavigableBeforeSizesLand(t *testing.T) {
+	homebrew := diskFleet()
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+
+	var deferred []tea.Msg
+	for _, message := range immediateMessages(m.Init()) {
+		if _, ok := message.(sizesResultMsg); ok {
+			deferred = append(deferred, message)
+			continue
+		}
+		_, next := m.Update(message)
+		if _, ok := message.(listResultMsg); ok && next != nil {
+			if result, ok := next().(info.Result); ok {
+				m.Update(result)
+			}
+		}
+	}
+
+	if !m.sizesPending || m.sizes != nil {
+		t.Fatalf("expected an in-flight measurement: pending=%v sizes=%v", m.sizesPending, m.sizes)
+	}
+	if m.loading || m.spinnerActive {
+		t.Fatalf("the measurement gated the list: loading=%v spinner=%v", m.loading, m.spinnerActive)
+	}
+	if got := len(m.list.VisibleItems()); got != 2 {
+		t.Fatalf("rendered %d rows before sizes landed, want 2", got)
+	}
+	m.Update(textKey("j"))
+	if m.list.Index() != 1 {
+		t.Fatalf("selection=%d, want j to move before sizes landed", m.list.Index())
+	}
+	if got := strippedLines(m)[3]; !strings.Contains(got, "Alpha") {
+		t.Fatalf("row before sizes landed=%q, want it rendered", got)
+	}
+
+	for _, message := range deferred {
+		m.Update(message)
+	}
+	if m.sizes == nil || m.sizesPending {
+		t.Fatal("the landed measurement was not retained")
+	}
+	if m.spinnerActive {
+		t.Fatal("the measurement started the spinner on completion")
+	}
+}
+
+func TestSizeFailureNeverDisplacesARealStatus(t *testing.T) {
+	m, _ := newFleetModel(t)
+	m.status, m.priority = "Uninstalled Alpha", true
+
+	measured := m.sizes
+	m.Update(sizesResultMsg{id: m.sizesID, err: errors.New("du: permission denied")})
+	if m.status != "Uninstalled Alpha" || !m.priority {
+		t.Fatalf("status=%q priority=%v, want the priority message untouched", m.status, m.priority)
+	}
+	// A failure caches nothing of its own and does not discard what was measured.
+	if m.sizes != measured {
+		t.Fatalf("sizes=%v, want the last good measurement kept", m.sizes)
+	}
+
+	m.sizes = nil
+	m.status, m.priority = "", false
+	m.Update(sizesResultMsg{id: m.sizesID, err: errors.New("du: permission\ndenied")})
+	if m.status != "du: permission denied" || m.priority {
+		t.Fatalf("status=%q priority=%v, want the flattened failure in the empty slot", m.status, m.priority)
+	}
+	if m.sizes != nil {
+		t.Fatal("a failed measurement was cached")
+	}
+}
+
+func TestStaleSizeResultIsIgnored(t *testing.T) {
+	m, _ := newFleetModel(t)
+	m.Update(sizesResultMsg{id: m.sizesID - 1, sizes: brew.Sizes{Total: 42}})
+	if m.sizes.Total == 42 {
+		t.Fatal("a superseded measurement was applied")
+	}
+}
+
+func TestBothCacheInvalidationSitesDropSizesAndRemeasure(t *testing.T) {
+	t.Run("refresh", func(t *testing.T) {
+		m, homebrew := newFleetModel(t)
+		calls := homebrew.sizesCalls
+		if m.sizes == nil {
+			t.Fatal("startup left no measurement to invalidate")
+		}
+		command := m.updateNormal(textKey("r"))
+		if m.sizes != nil {
+			t.Fatal("refresh kept a stale measurement")
+		}
+		drainList(t, m, command)
+		if got := homebrew.sizesCalls; got != calls+1 {
+			t.Fatalf("size calls=%d, want %d after refresh", got, calls+1)
+		}
+	})
+
+	t.Run("committed uninstall", func(t *testing.T) {
+		m, uninstaller := newTestModel(t)
+		homebrew := m.homebrew.(*fakeHomebrew)
+		calls := homebrew.sizesCalls
+		startFakeUninstall(t, m, uninstaller)
+		uninstaller.job.finish(uninstall.Result{})
+		_, reload := m.Update(jobResultMsg{id: m.operationID, result: uninstall.Result{}})
+		if m.sizes != nil {
+			t.Fatal("a committed uninstall kept a stale measurement")
+		}
+		drainList(t, m, reload)
+		if got := homebrew.sizesCalls; got != calls+1 {
+			t.Fatalf("size calls=%d, want %d after a committed uninstall", got, calls+1)
+		}
+	})
+
+	t.Run("a kind switch is not an invalidation site", func(t *testing.T) {
+		m, homebrew := newFleetModel(t)
+		calls := homebrew.sizesCalls
+		drainList(t, m, m.switchKind())
+		drainList(t, m, m.switchKind())
+		m.updateNormal(textKey("d"))
+		m.updateNormal(textKey("o"))
+		if m.sizes == nil {
+			t.Fatal("a kind switch or a toggle dropped the measurement")
+		}
+		if got := homebrew.sizesCalls; got != calls {
+			t.Fatalf("size calls=%d, want %d: only refresh and uninstall remeasure", got, calls)
+		}
+	})
+}
+
+func TestQuitWaitsForTypedSizeResult(t *testing.T) {
+	m, _ := newTestModel(t)
+	homebrew := m.homebrew.(*fakeHomebrew)
+	started := make(chan struct{})
+	homebrew.sizesStarted = started
+	result := make(chan tea.Msg, 1)
+	go func() { result <- m.startSizes()() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("size pass did not start")
+	}
+
+	_, quit := m.Update(textKey("q"))
+	if quit != nil {
+		t.Fatal("quit returned before the typed size result")
+	}
+	var completed tea.Msg
+	select {
+	case completed = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("size pass did not observe synchronous cancellation")
+	}
+	_, quit = m.Update(completed)
+	requireQuit(t, quit)
+	requireQuittingState(t, m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := m.supervisor.Cleanup(ctx); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+}
+
+func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
+	for _, pressed := range []string{"d", "D", "o", "O"} {
+		t.Run("search consumes "+pressed, func(t *testing.T) {
+			m, _ := newFleetModel(t)
+			m.Update(textKey("/"))
+			m.Update(textKey(pressed))
+			if m.query != pressed {
+				t.Fatalf("query=%q, want the key typed as text", m.query)
+			}
+			if m.showDeps || m.sortBySize {
+				t.Fatalf("search mode applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			}
+		})
+
+		t.Run("confirmation cancels on "+pressed, func(t *testing.T) {
+			m, _ := newFleetModel(t)
+			m.Update(textKey("u"))
+			m.Update(textKey(pressed))
+			if m.mode != modeNormal || m.status != "Uninstall cancelled" {
+				t.Fatalf("mode=%v status=%q, want a cancelled confirmation", m.mode, m.status)
+			}
+			if m.showDeps || m.sortBySize {
+				t.Fatalf("confirmation applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			}
+		})
+
+		t.Run("loading ignores "+pressed, func(t *testing.T) {
+			m, _ := newFleetModel(t)
+			m.loading = true
+			m.loadPurpose = loadRefresh
+			m.Update(textKey(pressed))
+			if m.showDeps || m.sortBySize {
+				t.Fatalf("a loading list applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			}
+		})
+
+		t.Run("quitting ignores "+pressed, func(t *testing.T) {
+			m, _ := newFleetModel(t)
+			m.mode = modeQuitting
+			m.Update(textKey(pressed))
+			if m.showDeps || m.sortBySize {
+				t.Fatalf("quitting applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			}
+		})
 	}
 }
