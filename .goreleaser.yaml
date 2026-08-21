@@ -29,42 +29,19 @@ checksum:
   name_template: checksums.txt
 
 changelog:
-  # Not github-native: that derives notes from merged pull requests, and this
-  # repository lands everything as direct commits, so every release body was just
-  # a compare link. Read the commits instead — they are Conventional Commits, so
-  # they group cleanly. The workflow already checks out with fetch-depth 0, which
-  # this needs to see history between tags.
-  use: git
-  sort: asc
-  groups:
-    - title: Features
-      regexp: '\bfeat(\([^)]+\))?!?:'
-      order: 0
-    - title: Fixes
-      regexp: '\bfix(\([^)]+\))?!?:'
-      order: 1
-    - title: Performance
-      regexp: '\bperf(\([^)]+\))?!?:'
-      order: 2
-    - title: Build and release
-      regexp: '\b(build|ci)(\([^)]+\))?!?:'
-      order: 3
-    - title: Documentation
-      regexp: '\bdocs(\([^)]+\))?!?:'
-      order: 4
-    - title: Other
-      order: 999
-  filters:
-    exclude:
-      - '\btest(\([^)]+\))?!?:'
-      - '\bchore(\([^)]+\))?!?:'
-      - '\bstyle(\([^)]+\))?!?:'
-      - '\brefactor(\([^)]+\))?!?:'
-      - '^Merge '
+  # release-please owns the changelog now. It accumulates entries into
+  # CHANGELOG.md on the release pull request and writes the GitHub release body
+  # when that pull request merges, so a second changelog generated here would
+  # only compete with it.
+  disable: true
 
 release:
   name_template: 'lazybrew {{ .Version }}'
   replace_existing_artifacts: true
+  # release-please has already created this release, with its own notes. Upload
+  # artifacts into it and leave the body alone. This is GoReleaser's default,
+  # stated explicitly because the notes are not ours to overwrite.
+  mode: keep-existing
 
 homebrew_casks:
   - name: lazybrew
