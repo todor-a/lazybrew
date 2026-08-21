@@ -2,6 +2,7 @@ package uninstall
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -11,6 +12,53 @@ import (
 	"testing"
 	"time"
 )
+
+func TestDarwinProcessGroupInspectionFindsLiveMember(t *testing.T) {
+	live, err := processGroupHasLiveMembers(syscall.Getpgrp())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !live {
+		t.Fatal("current live process group reported gone")
+	}
+}
+
+func TestDarwinProcessGroupInspectionReportsAcquisitionError(t *testing.T) {
+	if _, err := processGroupHasLiveMembers(1); err == nil {
+		t.Fatal("invalid process group inspection succeeded")
+	}
+}
+
+func TestWaitGroupGoneDistinguishesKernelObservation(t *testing.T) {
+	oldInspect := inspectTrackedGroup
+	t.Cleanup(func() { inspectTrackedGroup = oldInspect })
+
+	cases := []struct {
+		name string
+		live bool
+		err  error
+		want bool
+	}{
+		{name: "live member", live: true, want: false},
+		{name: "reused live group", live: true, want: false},
+		{name: "zombie-only group", want: true},
+		{name: "empty group", want: true},
+		{name: "acquisition failure", err: errors.New("sysctl failed"), want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inspectTrackedGroup = func(pgid int) (bool, error) {
+				if pgid != 4242 {
+					t.Fatalf("inspected pgid %d, want 4242", pgid)
+				}
+				return tc.live, tc.err
+			}
+			if got := waitGroupGone(4242, 0); got != tc.want {
+				t.Fatalf("waitGroupGone returned %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 func validPeerEvidence() peerEvidence {
 	return peerEvidence{

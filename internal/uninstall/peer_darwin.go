@@ -9,6 +9,7 @@ package uninstall
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/proc.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
 #include <sys/un.h>
@@ -77,6 +78,63 @@ static int lb_proc_argv(pid_t pid, char *out, size_t out_cap) {
 	return (int)used;
 }
 
+static int lb_process_group_has_live_members(pid_t pgid, int *has_live) {
+	if (pgid <= 1 || has_live == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PGRP, pgid };
+	for (int attempt = 0; attempt < 4; attempt++) {
+		size_t capacity = 0;
+		if (sysctl(mib, 4, NULL, &capacity, NULL, 0) != 0) {
+			if (errno == ESRCH) {
+				*has_live = 0;
+				return 0;
+			}
+			return -1;
+		}
+		if (capacity == 0) {
+			*has_live = 0;
+			return 0;
+		}
+		struct kinfo_proc *entries = malloc(capacity);
+		if (entries == NULL) {
+			errno = ENOMEM;
+			return -1;
+		}
+		size_t used = capacity;
+		if (sysctl(mib, 4, entries, &used, NULL, 0) != 0) {
+			int saved_errno = errno;
+			free(entries);
+			if (saved_errno == ESRCH) {
+				*has_live = 0;
+				return 0;
+			}
+			if (saved_errno == ENOMEM) continue;
+			errno = saved_errno;
+			return -1;
+		}
+		if (used > capacity || used % sizeof(*entries) != 0) {
+			free(entries);
+			errno = EPROTO;
+			return -1;
+		}
+		size_t count = used / sizeof(*entries);
+		for (size_t i = 0; i < count; i++) {
+			if (entries[i].kp_proc.p_stat != SZOMB) {
+				free(entries);
+				*has_live = 1;
+				return 0;
+			}
+		}
+		free(entries);
+		*has_live = 0;
+		return 0;
+	}
+	errno = EAGAIN;
+	return -1;
+}
+
 static int lb_code_identity(pid_t pid, unsigned char *out, size_t out_cap) {
 	SecCodeRef code = NULL;
 	CFDictionaryRef attributes = NULL;
@@ -122,6 +180,7 @@ import "C"
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"unsafe"
@@ -153,6 +212,17 @@ func disableCoreDumps() error {
 		return errors.New("could not disable core dumps")
 	}
 	return nil
+}
+
+func processGroupHasLiveMembers(pgid int) (bool, error) {
+	var live C.int
+	if result, err := C.lb_process_group_has_live_members(C.pid_t(pgid), &live); result != 0 {
+		return false, fmt.Errorf("could not inspect process group %d: %w", pgid, err)
+	}
+	if live != 0 && live != 1 {
+		return false, errors.New("process group inspection returned invalid state")
+	}
+	return live == 1, nil
 }
 
 func loadedCodeIdentity(pid int) ([]byte, error) {

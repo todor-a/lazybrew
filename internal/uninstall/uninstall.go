@@ -76,6 +76,7 @@ var (
 	peerCheckInterval       = 50 * time.Millisecond
 	setCoreLimit            = disableCoreDumps
 	signalTrackedGroup      = signalGroup
+	inspectTrackedGroup     = processGroupHasLiveMembers
 	observeTrackedGroupGone = waitGroupGone
 	observeKnownGone        = knownProcessesGone
 	waitCommand             = func(cmd *exec.Cmd) error { return cmd.Wait() }
@@ -650,12 +651,12 @@ func signalGroup(pgid int, sig syscall.Signal) error {
 func waitGroupGone(pgid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
-		err := syscall.Kill(-pgid, 0)
-		if errors.Is(err, syscall.ESRCH) {
-			return true
-		}
+		live, err := inspectTrackedGroup(pgid)
 		if err != nil {
 			return false
+		}
+		if !live {
+			return true
 		}
 		if time.Now().After(deadline) {
 			return false
