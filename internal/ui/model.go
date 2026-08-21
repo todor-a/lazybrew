@@ -1,0 +1,1062 @@
+package ui
+
+import (
+	"context"
+	"errors"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"unicode/utf8"
+
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+
+	"lazybrew/internal/brew"
+	"lazybrew/internal/info"
+	"lazybrew/internal/uninstall"
+)
+
+const (
+	minimumWidth  = 32
+	minimumHeight = 9
+)
+
+type mode uint8
+
+const (
+	modeNormal mode = iota
+	modeSearch
+	modeConfirm
+	modeUninstall
+	modePassword
+	modeQuitting
+)
+
+type loadPurpose uint8
+
+const (
+	loadStartup loadPurpose = iota
+	loadSwitch
+	loadRefresh
+	loadAfterUninstall
+)
+
+type cancelReason uint8
+
+const (
+	cancelNone cancelReason = iota
+	cancelUser
+	cancelTerminal
+	cancelAuthentication
+)
+
+type packageItem struct{ packageValue brew.Package }
+
+func (i packageItem) FilterValue() string {
+	p := i.packageValue
+	return p.Name + " " + p.Version + " " + string(p.Kind)
+}
+
+type packageDelegate struct{}
+
+func (packageDelegate) Height() int                                  { return 1 }
+func (packageDelegate) Spacing() int                                 { return 0 }
+func (packageDelegate) Update(tea.Msg, *list.Model) tea.Cmd          { return nil }
+func (packageDelegate) Render(io.Writer, list.Model, int, list.Item) {}
+
+// Supervisor owns cancellation and completion handles beyond the Tea run loop.
+type Supervisor struct {
+	mu sync.Mutex
+
+	info *info.Loader
+
+	closing           bool
+	listCancel        context.CancelFunc
+	listDone          <-chan struct{}
+	startCancel       context.CancelFunc
+	startDone         <-chan struct{}
+	job               uninstall.Job
+	jobDone           <-chan struct{}
+	jobResultRecorded bool
+
+	exitCode   int
+	cleanupErr error
+}
+
+func (s *Supervisor) setList(cancel context.CancelFunc, done <-chan struct{}) {
+	s.mu.Lock()
+	closing := s.closing
+	if !closing {
+		s.listCancel, s.listDone = cancel, done
+	}
+	s.mu.Unlock()
+	if closing {
+		cancel()
+	}
+}
+
+func (s *Supervisor) clearList(done <-chan struct{}) {
+	s.mu.Lock()
+	if s.listDone == done {
+		s.listCancel, s.listDone = nil, nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) setStart(cancel context.CancelFunc, done <-chan struct{}) {
+	s.mu.Lock()
+	closing := s.closing
+	if !closing {
+		s.startCancel, s.startDone = cancel, done
+	}
+	s.mu.Unlock()
+	if closing {
+		cancel()
+	}
+}
+
+func (s *Supervisor) clearStart(done <-chan struct{}) {
+	s.mu.Lock()
+	if s.startDone == done {
+		s.startCancel, s.startDone = nil, nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) setJob(job uninstall.Job, done <-chan struct{}) {
+	s.mu.Lock()
+	s.job, s.jobDone = job, done
+	s.jobResultRecorded = false
+	closing := s.closing
+	s.mu.Unlock()
+	if closing {
+		job.Cancel()
+	}
+}
+
+func (s *Supervisor) finishJob(result uninstall.Result) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.jobResultRecorded {
+		return
+	}
+	s.jobResultRecorded = true
+	if result.CleanupErr != nil {
+		s.cleanupErr = errors.Join(s.cleanupErr, result.CleanupErr)
+	}
+}
+
+func (s *Supervisor) setExitCode(code int) {
+	s.mu.Lock()
+	s.exitCode = code
+	s.mu.Unlock()
+}
+
+// ExitCode reports a signal-derived or cleanup-derived process result.
+func (s *Supervisor) ExitCode() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.exitCode
+}
+
+// cancel synchronously stops new work and every currently owned operation.
+func (s *Supervisor) cancel() {
+	s.mu.Lock()
+	s.closing = true
+	listCancel := s.listCancel
+	startCancel := s.startCancel
+	job := s.job
+	s.mu.Unlock()
+
+	if listCancel != nil {
+		listCancel()
+	}
+	if startCancel != nil {
+		startCancel()
+	}
+	if s.info != nil {
+		s.info.Cancel()
+	}
+	if job != nil {
+		job.Cancel()
+	}
+}
+
+// Cleanup idempotently cancels every owned operation and boundedly awaits its existing owner.
+func (s *Supervisor) Cleanup(ctx context.Context) error {
+	s.cancel()
+
+	s.mu.Lock()
+	listDone := s.listDone
+	startDone := s.startDone
+	jobDone := s.jobDone
+	s.mu.Unlock()
+
+	waits := []<-chan struct{}{listDone, startDone, jobDone}
+	if s.info != nil {
+		waits = append(waits, s.info.Done())
+	}
+	s.rememberCleanup(awaitAll(ctx, waits...))
+
+	// Start may have raced with cancellation and registered a real job.
+	s.mu.Lock()
+	racedJob, racedJobDone := s.job, s.jobDone
+	s.mu.Unlock()
+	if racedJob != nil && racedJobDone != jobDone {
+		racedJob.Cancel()
+		s.rememberCleanup(await(ctx, racedJobDone))
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleanupErr
+}
+
+func awaitAll(ctx context.Context, waits ...<-chan struct{}) error {
+	results := make(chan error, len(waits))
+	count := 0
+	for _, done := range waits {
+		if done == nil {
+			continue
+		}
+		count++
+		go func(done <-chan struct{}) {
+			results <- await(ctx, done)
+		}(done)
+	}
+
+	var joined error
+	for range count {
+		joined = errors.Join(joined, <-results)
+	}
+	return joined
+}
+
+func await(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return errors.New("cleanup did not complete: " + ctx.Err().Error())
+	}
+}
+
+func (s *Supervisor) rememberCleanup(err error) {
+	s.mu.Lock()
+	s.cleanupErr = errors.Join(s.cleanupErr, err)
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) cleanupError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleanupErr
+}
+
+// SignalMsg lets main supervise SIGINT and SIGTERM through the same cleanup path.
+type SignalMsg struct{ ExitCode int }
+
+type listResultMsg struct {
+	id       uint64
+	kind     brew.Kind
+	purpose  loadPurpose
+	packages []brew.Package
+	err      error
+	done     <-chan struct{}
+}
+
+type jobStartedMsg struct {
+	id        uint64
+	job       uninstall.Job
+	events    <-chan uninstall.Event
+	result    <-chan uninstall.Result
+	startDone <-chan struct{}
+}
+
+type jobStartFailedMsg struct {
+	id        uint64
+	err       error
+	startDone <-chan struct{}
+}
+
+type jobEventMsg struct {
+	id    uint64
+	event uninstall.Event
+	open  bool
+}
+
+type jobResultMsg struct {
+	id     uint64
+	result uninstall.Result
+}
+
+type model struct {
+	homebrew    brew.Homebrew
+	info        *info.Loader
+	uninstaller uninstall.Uninstaller
+	supervisor  *Supervisor
+
+	mode          mode
+	kind          brew.Kind
+	query         string
+	width, height int
+	contentRows   int
+	themeIndex    int
+	monochrome    bool
+
+	list     list.Model
+	help     help.Model
+	viewport viewport.Model
+	spinner  spinner.Model
+	password textinput.Model
+
+	loading       bool
+	loadPurpose   loadPurpose
+	loadID        uint64
+	loadSelection int
+	listCancel    context.CancelFunc
+	infoPending   bool
+
+	status           string
+	priority         bool
+	confirmation     *brew.Package
+	operation        *brew.Package
+	operationID      uint64
+	operationCancel  context.CancelFunc
+	startPending     bool
+	job              uninstall.Job
+	jobEvents        <-chan uninstall.Event
+	jobResult        <-chan uninstall.Result
+	jobPending       bool
+	passwordRequest  uninstall.RequestID
+	passwordAttempts int
+	cancelReason     cancelReason
+	spinnerActive    bool
+	quitExitCode     int
+}
+
+// New constructs the complete UI and the supervisor retained by main.
+func New(homebrew brew.Homebrew, loader *info.Loader, uninstaller uninstall.Uninstaller) (tea.Model, *Supervisor) {
+	items := list.New(nil, packageDelegate{}, 0, 0)
+	items.SetShowTitle(false)
+	items.SetShowFilter(false)
+	items.SetShowStatusBar(false)
+	items.SetShowPagination(false)
+	items.SetShowHelp(false)
+	items.InfiniteScrolling = false
+	items.KeyMap = list.KeyMap{}
+	items.Filter = substringFilter
+
+	h := help.New()
+	h.ShortSeparator = "  "
+	h.Ellipsis = ""
+
+	sp := spinner.New()
+	sp.Spinner = spinner.Line
+
+	m := &model{
+		homebrew:      homebrew,
+		info:          loader,
+		uninstaller:   uninstaller,
+		mode:          modeNormal,
+		kind:          brew.Cask,
+		list:          items,
+		help:          h,
+		spinner:       sp,
+		password:      blankPasswordInput(),
+		monochrome:    os.Getenv("NO_COLOR") != "",
+		loading:       true,
+		loadPurpose:   loadStartup,
+		spinnerActive: true,
+	}
+	m.viewport = viewport.New(viewport.WithWidth(0), viewport.WithHeight(0))
+	m.viewport.SoftWrap = true
+	m.viewport.FillHeight = true
+	s := &Supervisor{info: loader}
+	m.supervisor = s
+	return m, s
+}
+
+func substringFilter(term string, targets []string) []list.Rank {
+	term = strings.ToLower(term)
+	matches := make([]list.Rank, 0, len(targets))
+	for i, target := range targets {
+		if strings.Contains(strings.ToLower(target), term) {
+			matches = append(matches, list.Rank{Index: i})
+		}
+	}
+	return matches
+}
+
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(m.startList(loadStartup, 0), m.spinner.Tick)
+}
+
+func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := message.(type) {
+	case tea.WindowSizeMsg:
+		return m, m.resize(msg.Width, msg.Height)
+	case tea.ColorProfileMsg:
+		profile := msg.Profile.String()
+		m.monochrome = os.Getenv("NO_COLOR") != "" ||
+			profile == "Unknown" || profile == "NoTTY" || profile == "Ascii"
+		return m, nil
+	case SignalMsg:
+		if msg.ExitCode != 130 && msg.ExitCode != 143 {
+			return m, nil
+		}
+		return m, m.beginQuit(msg.ExitCode)
+	case info.Result:
+		cmd := m.info.Complete(msg)
+		m.infoPending = cmd != nil
+		if m.mode == modeQuitting {
+			return m, m.finishQuit()
+		}
+		m.syncInfo()
+		return m, cmd
+	case listResultMsg:
+		return m, m.handleListResult(msg)
+	case jobStartedMsg:
+		return m, m.handleJobStarted(msg)
+	case jobStartFailedMsg:
+		return m, m.handleJobStartFailed(msg)
+	case jobEventMsg:
+		return m, m.handleJobEvent(msg)
+	case jobResultMsg:
+		return m, m.handleJobResult(msg)
+	case spinner.TickMsg:
+		if !m.spinnerActive {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	case tea.PasteMsg:
+		if m.mode == modePassword {
+			return m, nil
+		}
+	}
+
+	key, ok := message.(tea.KeyPressMsg)
+	if !ok {
+		return m, nil
+	}
+	if key.String() == "ctrl+c" {
+		return m, m.beginQuit(130)
+	}
+	if m.width < minimumWidth || m.height < minimumHeight {
+		if key.String() == "q" || key.String() == "Q" {
+			return m, m.beginQuit(0)
+		}
+		return m, nil
+	}
+	if m.mode == modeQuitting {
+		return m, nil
+	}
+	if m.loading {
+		if m.loadPurpose != loadAfterUninstall && (key.String() == "q" || key.String() == "Q") {
+			return m, m.beginQuit(0)
+		}
+		return m, nil
+	}
+
+	switch m.mode {
+	case modeSearch:
+		return m, m.updateSearch(key)
+	case modeConfirm:
+		return m, m.updateConfirmation(key)
+	case modePassword:
+		return m, m.updatePassword(key)
+	case modeUninstall:
+		return m, nil
+	default:
+		return m, m.updateNormal(key)
+	}
+}
+
+func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
+	switch key.String() {
+	case "up", "k":
+		before := m.list.Index()
+		m.list.CursorUp()
+		if m.list.Index() != before {
+			return m.selectInfo()
+		}
+	case "down", "j":
+		before := m.list.Index()
+		m.list.CursorDown()
+		if m.list.Index() != before {
+			return m.selectInfo()
+		}
+	case "/", "s", "S":
+		m.mode = modeSearch
+	case "tab":
+		m.kind = otherKind(m.kind)
+		m.status, m.priority = "", false
+		m.setPackages(nil, 0)
+		m.info.Select(nil)
+		return tea.Batch(m.startList(loadSwitch, 0), m.spinner.Tick)
+	case "u", "U":
+		selected := m.selectedPackage()
+		if selected == nil {
+			return nil
+		}
+		if !m.confirmationFits(*selected) {
+			m.status, m.priority = "Widen terminal to confirm", true
+			return nil
+		}
+		snapshot := *selected
+		m.confirmation = &snapshot
+		m.mode = modeConfirm
+		m.status, m.priority = "Confirm uninstall", true
+	case "t", "T":
+		m.themeIndex = (m.themeIndex + 1) % len(themes)
+		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
+	case "r", "R":
+		selection := m.list.Index()
+		m.info.Refresh(nil)
+		return tea.Batch(m.startList(loadRefresh, selection), m.spinner.Tick)
+	case "q", "Q":
+		return m.beginQuit(0)
+	}
+	return nil
+}
+
+func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
+	switch key.String() {
+	case "enter":
+		m.mode = modeNormal
+		return nil
+	case "esc":
+		m.query = ""
+		m.applyFilter(0)
+		m.mode = modeNormal
+		return m.selectInfo()
+	case "backspace", "ctrl+h":
+		if m.query == "" {
+			return nil
+		}
+		runes := []rune(m.query)
+		m.query = string(runes[:len(runes)-1])
+		m.applyFilter(0)
+		return m.selectInfo()
+	case "delete":
+		return nil
+	}
+	if text := key.Key().Text; text != "" {
+		m.query += text
+		m.applyFilter(0)
+		return m.selectInfo()
+	}
+	return nil
+}
+
+func (m *model) updateConfirmation(key tea.KeyPressMsg) tea.Cmd {
+	snapshot := m.confirmation
+	m.confirmation = nil
+	if key.Key().Text != "y" || snapshot == nil {
+		m.mode = modeNormal
+		m.status, m.priority = "Uninstall cancelled", true
+		return nil
+	}
+	if !m.confirmationFits(*snapshot) {
+		m.mode = modeNormal
+		m.status, m.priority = "Terminal too small; uninstall cancelled", true
+		return nil
+	}
+	return m.startUninstall(*snapshot)
+}
+
+func (m *model) updatePassword(key tea.KeyPressMsg) tea.Cmd {
+	switch key.String() {
+	case "enter":
+		value := m.password.Value()
+		payload := []byte(value)
+		request := m.passwordRequest
+		m.wipePassword()
+		m.mode = modeUninstall
+		err := m.job.RespondPassword(request, payload)
+		for i := range payload {
+			payload[i] = 0
+		}
+		value = ""
+		if err != nil {
+			m.job.Cancel()
+			m.cancelReason = cancelAuthentication
+			m.status, m.priority = "Administrator authentication failed", true
+		}
+		return nil
+	case "esc":
+		m.job.CancelPassword(m.passwordRequest)
+		m.job.Cancel()
+		m.wipePassword()
+		m.mode = modeUninstall
+		m.cancelReason = cancelUser
+		m.status, m.priority = "Cancelling "+m.operation.Name+"...", true
+		return nil
+	case "backspace", "ctrl+h":
+		value := m.password.Value()
+		runes := []rune(value)
+		if len(runes) > 0 {
+			m.password.SetValue(string(runes[:len(runes)-1]))
+		}
+		for i := range runes {
+			runes[i] = 0
+		}
+		value = ""
+		return nil
+	case "delete":
+		return nil
+	}
+	text := key.Key().Text
+	if text == "" {
+		return nil
+	}
+	value := m.password.Value()
+	runes := []rune(value)
+	runeCount := len(runes)
+	byteCount := len(value)
+	for _, r := range text {
+		size := utf8.RuneLen(r)
+		if runeCount == 256 || byteCount+size > 1024 {
+			break
+		}
+		runes = append(runes, r)
+		runeCount++
+		byteCount += size
+	}
+	m.password.SetValue(string(runes))
+	for i := range runes {
+		runes[i] = 0
+	}
+	value = ""
+	return nil
+}
+
+func (m *model) startUninstall(snapshot brew.Package) tea.Cmd {
+	m.mode = modeUninstall
+	m.operation = &snapshot
+	m.operationID++
+	id := m.operationID
+	m.passwordAttempts = 0
+	m.cancelReason = cancelNone
+	m.status, m.priority = "Uninstalling "+snapshot.Name+"...", true
+	m.spinnerActive = true
+
+	ctx, cancel := context.WithCancel(context.Background())
+	m.operationCancel = cancel
+	m.startPending = true
+	startDone := make(chan struct{})
+	m.supervisor.setStart(cancel, startDone)
+	return tea.Batch(func() tea.Msg {
+		job, err := m.uninstaller.Start(ctx, snapshot)
+		if err != nil {
+			close(startDone)
+			return jobStartFailedMsg{id: id, err: err, startDone: startDone}
+		}
+		result := make(chan uninstall.Result, 1)
+		waitDone := make(chan struct{})
+		m.supervisor.setJob(job, waitDone)
+		go func() {
+			terminal := job.Wait()
+			m.supervisor.finishJob(terminal)
+			result <- terminal
+			close(result)
+			close(waitDone)
+		}()
+		close(startDone)
+		return jobStartedMsg{id: id, job: job, events: job.Events(), result: result, startDone: startDone}
+	}, m.spinner.Tick)
+}
+
+func (m *model) handleJobStarted(msg jobStartedMsg) tea.Cmd {
+	m.supervisor.clearStart(msg.startDone)
+	if msg.id != m.operationID {
+		msg.job.Cancel()
+		return nil
+	}
+	m.startPending = false
+	m.jobPending = true
+	m.job, m.jobEvents, m.jobResult = msg.job, msg.events, msg.result
+	if m.cancelReason != cancelNone || m.mode == modeQuitting {
+		msg.job.Cancel()
+	}
+	if m.mode == modeQuitting {
+		return waitJobResult(msg.id, msg.result)
+	}
+	return tea.Batch(waitJobEvent(msg.id, msg.events), waitJobResult(msg.id, msg.result))
+}
+
+func (m *model) handleJobStartFailed(msg jobStartFailedMsg) tea.Cmd {
+	m.supervisor.clearStart(msg.startDone)
+	if msg.id != m.operationID {
+		return nil
+	}
+	m.startPending = false
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+	m.spinnerActive = false
+	if m.operationCancel != nil {
+		m.operationCancel()
+	}
+	m.operation, m.operationCancel = nil, nil
+	m.mode = modeNormal
+	if m.cancelReason == cancelTerminal {
+		m.status = "Terminal too small; uninstall cancelled"
+	} else if msg.err != nil {
+		m.status = flattenStatus(msg.err.Error())
+	} else {
+		m.status = "Could not start uninstall"
+	}
+	m.priority = true
+	return nil
+}
+
+func waitJobEvent(id uint64, events <-chan uninstall.Event) tea.Cmd {
+	return func() tea.Msg {
+		event, open := <-events
+		return jobEventMsg{id: id, event: event, open: open}
+	}
+}
+
+func waitJobResult(id uint64, result <-chan uninstall.Result) tea.Cmd {
+	return func() tea.Msg { return jobResultMsg{id: id, result: <-result} }
+}
+
+func (m *model) handleJobEvent(msg jobEventMsg) tea.Cmd {
+	if msg.id != m.operationID || m.mode == modeQuitting {
+		return nil
+	}
+	if m.job == nil {
+		return nil
+	}
+	if !msg.open {
+		return nil
+	}
+	if msg.event.Type != uninstall.PasswordRequested || m.mode != modeUninstall || m.cancelReason != cancelNone {
+		if m.mode == modePassword {
+			m.wipePassword()
+			m.mode = modeUninstall
+			m.status, m.priority = "Administrator authentication failed", true
+			m.cancelReason = cancelAuthentication
+		}
+		m.job.Cancel()
+		return waitJobEvent(msg.id, m.jobEvents)
+	}
+	m.passwordAttempts++
+	m.passwordRequest = msg.event.RequestID
+	m.password = newPasswordInput(m.width)
+	m.mode = modePassword
+	focus := m.password.Focus()
+	return tea.Batch(focus, waitJobEvent(msg.id, m.jobEvents))
+}
+
+func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
+	if msg.id != m.operationID {
+		return nil
+	}
+	m.supervisor.finishJob(msg.result)
+	m.wipePassword()
+	m.spinnerActive = false
+	m.job, m.jobEvents, m.jobResult = nil, nil, nil
+	m.jobPending = false
+	if m.operationCancel != nil {
+		m.operationCancel()
+	}
+	m.operationCancel = nil
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+
+	result := msg.result
+	switch {
+	case result.CleanupErr != nil:
+		status := "Uninstall cleanup failed: " + flattenStatus(result.CleanupErr.Error())
+		cmd := m.beginQuit(1)
+		m.status, m.priority = status, true
+		return cmd
+	case result.AuthTimedOut:
+		m.finishUninstall("Administrator authentication timed out")
+	case result.AuthFailed:
+		m.finishUninstall("Administrator authentication failed")
+	case result.Cancelled:
+		switch m.cancelReason {
+		case cancelTerminal:
+			m.finishUninstall("Terminal too small; uninstall cancelled")
+		case cancelAuthentication:
+			m.finishUninstall("Administrator authentication failed")
+		default:
+			m.finishUninstall("Uninstall cancelled")
+		}
+	case result.Err != nil:
+		m.finishUninstall(flattenStatus(result.Err.Error()))
+	default:
+		selection := m.list.Index()
+		m.info.Refresh(nil)
+		m.mode = modeUninstall
+		m.spinnerActive = true
+		return tea.Batch(m.startList(loadAfterUninstall, selection), m.spinner.Tick)
+	}
+	return nil
+}
+
+func (m *model) finishUninstall(status string) {
+	m.mode = modeNormal
+	m.status, m.priority = status, true
+	m.operation = nil
+	m.cancelReason = cancelNone
+}
+
+func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
+	m.loading = true
+	m.loadPurpose = purpose
+	m.loadSelection = selection
+	m.loadID++
+	id, kind := m.loadID, m.kind
+	m.spinnerActive = true
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.supervisor.setList(cancel, done)
+	m.listCancel = cancel
+	return func() tea.Msg {
+		packages, err := m.homebrew.List(ctx, kind)
+		close(done)
+		return listResultMsg{id: id, kind: kind, purpose: purpose, packages: packages, err: err, done: done}
+	}
+}
+
+func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
+	m.supervisor.clearList(msg.done)
+	if msg.id != m.loadID {
+		return nil
+	}
+	if m.listCancel != nil {
+		m.listCancel()
+	}
+	m.listCancel = nil
+	m.loading = false
+	m.spinnerActive = false
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+	if msg.purpose == loadAfterUninstall && m.cancelReason == cancelTerminal {
+		m.finishUninstall("Terminal too small; uninstall cancelled")
+		return m.selectInfo()
+	}
+	if msg.err != nil {
+		m.setPackages(nil, 0)
+		m.info.Select(nil)
+		m.status, m.priority = flattenStatus(msg.err.Error()), false
+		if msg.purpose == loadAfterUninstall {
+			m.finishUninstall(m.status)
+		}
+		return nil
+	}
+	m.setPackages(msg.packages, m.loadSelection)
+	countStatus := installedStatus(len(msg.packages), msg.kind)
+	if msg.purpose == loadAfterUninstall {
+		name := ""
+		if m.operation != nil {
+			name = m.operation.Name
+		}
+		m.mode = modeNormal
+		m.operation = nil
+		m.cancelReason = cancelNone
+		m.status, m.priority = "Uninstalled "+name, true
+	} else {
+		m.mode = modeNormal
+		m.status, m.priority = countStatus, false
+	}
+	return m.selectInfo()
+}
+
+func (m *model) setPackages(packages []brew.Package, selection int) {
+	items := make([]list.Item, len(packages))
+	for i, pkg := range packages {
+		items[i] = packageItem{packageValue: pkg}
+	}
+	m.list.SetItems(items)
+	m.list.SetFilterText(m.query)
+	m.clampSelection(selection)
+}
+
+func (m *model) applyFilter(selection int) {
+	m.list.SetFilterText(m.query)
+	m.clampSelection(selection)
+}
+
+func (m *model) clampSelection(selection int) {
+	count := len(m.list.VisibleItems())
+	if count == 0 {
+		m.list.Select(0)
+		return
+	}
+	if selection < 0 {
+		selection = 0
+	}
+	if selection >= count {
+		selection = count - 1
+	}
+	m.list.Select(selection)
+}
+
+func (m *model) selectedPackage() *brew.Package {
+	item, ok := m.list.SelectedItem().(packageItem)
+	if !ok {
+		return nil
+	}
+	pkg := item.packageValue
+	return &pkg
+}
+
+func (m *model) selectInfo() tea.Cmd {
+	selected := m.selectedPackage()
+	m.viewport.SetYOffset(0)
+	cmd := m.info.Select(selected)
+	if cmd != nil {
+		m.infoPending = true
+	}
+	m.syncInfo()
+	return cmd
+}
+
+func (m *model) syncInfo() { m.viewport.SetContent(m.info.Text()) }
+
+func (m *model) resize(width, height int) tea.Cmd {
+	m.width, m.height = width, height
+	m.contentRows = max(0, height-7)
+	paneWidth := max(0, width-2)
+	if width >= 72 {
+		paneWidth = max(0, width/2-1)
+	}
+	selection := m.list.Index()
+	m.list.SetSize(paneWidth, m.contentRows)
+	m.clampSelection(selection)
+	m.help.SetWidth(max(0, width-2))
+	m.viewport.SetWidth(max(0, width-width/2-2))
+	m.viewport.SetHeight(max(0, m.contentRows-1))
+	if m.mode == modePassword {
+		m.password.SetWidth(max(1, min(40, width-16)))
+	}
+
+	if m.confirmation != nil && !m.confirmationFits(*m.confirmation) {
+		m.confirmation = nil
+		m.mode = modeNormal
+		m.status, m.priority = "Terminal too small; uninstall cancelled", true
+	}
+	if m.operation != nil && !m.confirmationFits(*m.operation) && m.cancelReason == cancelNone {
+		m.cancelReason = cancelTerminal
+		if m.mode == modePassword && m.job != nil {
+			m.job.CancelPassword(m.passwordRequest)
+		}
+		m.wipePassword()
+		if m.job != nil {
+			m.job.Cancel()
+		}
+		if m.operationCancel != nil {
+			m.operationCancel()
+		}
+		if m.loading && m.loadPurpose == loadAfterUninstall && m.listCancel != nil {
+			m.listCancel()
+		}
+		m.mode = modeUninstall
+		m.status, m.priority = "Terminal too small; uninstall cancelled", true
+	}
+	return nil
+}
+
+func (m *model) beginQuit(exitCode int) tea.Cmd {
+	if m.mode == modeQuitting {
+		if exitCode != 0 {
+			m.quitExitCode = exitCode
+			m.supervisor.setExitCode(exitCode)
+		}
+		return m.finishQuit()
+	}
+	if m.mode == modePassword {
+		if m.job != nil {
+			m.job.CancelPassword(m.passwordRequest)
+		}
+		m.wipePassword()
+	}
+	m.quitExitCode = exitCode
+	m.supervisor.setExitCode(exitCode)
+	m.mode = modeQuitting
+	m.status, m.priority = "Quitting...", true
+	m.spinnerActive = false
+	m.supervisor.cancel()
+	return m.finishQuit()
+}
+
+func (m *model) finishQuit() tea.Cmd {
+	if m.mode != modeQuitting || m.loading || m.infoPending || m.startPending || m.jobPending {
+		return nil
+	}
+	if m.supervisor.cleanupError() != nil {
+		m.quitExitCode = 1
+	}
+	m.supervisor.setExitCode(m.quitExitCode)
+	if m.quitExitCode == 130 {
+		return func() tea.Msg { return tea.Interrupt() }
+	}
+	return tea.Quit
+}
+
+func blankPasswordInput() textinput.Model {
+	input := textinput.New()
+	input.Prompt = ""
+	input.EchoMode = textinput.EchoPassword
+	input.EchoCharacter = '•'
+	input.CharLimit = 256
+	input.ShowSuggestions = false
+	input.KeyMap = textinput.KeyMap{}
+	input.Blur()
+	return input
+}
+
+func newPasswordInput(width int) textinput.Model {
+	input := blankPasswordInput()
+	input.SetWidth(max(1, min(40, width-16)))
+	return input
+}
+
+func (m *model) wipePassword() {
+	m.password.Reset()
+	m.password.Blur()
+	m.password = blankPasswordInput()
+	m.passwordRequest = uninstall.RequestID{}
+}
+
+func otherKind(kind brew.Kind) brew.Kind {
+	if kind == brew.Cask {
+		return brew.Formula
+	}
+	return brew.Cask
+}
+
+func installedStatus(count int, kind brew.Kind) string {
+	if kind == brew.Cask {
+		return strconv.Itoa(count) + " casks installed"
+	}
+	return strconv.Itoa(count) + " formulas installed"
+}
+
+func flattenStatus(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	lines := strings.Split(value, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
+	}
+	return strings.TrimSpace(strings.Join(lines, " "))
+}

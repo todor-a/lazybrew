@@ -1,0 +1,837 @@
+package ui
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	tea "charm.land/bubbletea/v2"
+
+	"lazybrew/internal/brew"
+	"lazybrew/internal/info"
+	"lazybrew/internal/uninstall"
+)
+
+type fakeHomebrew struct {
+	packages    map[brew.Kind][]brew.Package
+	err         error
+	listStarted chan struct{}
+}
+
+func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package, error) {
+	if f.listStarted != nil {
+		close(f.listStarted)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	packages := f.packages[kind]
+	copyOfPackages := append([]brew.Package(nil), packages...)
+	return copyOfPackages, nil
+}
+
+func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
+	return "details for " + pkg.Name, nil
+}
+
+type fakeUninstaller struct {
+	job          *fakeJob
+	starts       int
+	started      []brew.Package
+	err          error
+	startStarted chan struct{}
+}
+
+func (f *fakeUninstaller) Start(ctx context.Context, pkg brew.Package) (uninstall.Job, error) {
+	f.starts++
+	f.started = append(f.started, pkg)
+	if f.startStarted != nil {
+		close(f.startStarted)
+		<-ctx.Done()
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.job, nil
+}
+
+type fakeJob struct {
+	events      chan uninstall.Event
+	result      chan uninstall.Result
+	once        sync.Once
+	mu          sync.Mutex
+	passwords   [][]byte
+	passwordIDs []uninstall.RequestID
+}
+
+func newFakeJob() *fakeJob {
+	return &fakeJob{
+		events: make(chan uninstall.Event, 4),
+		result: make(chan uninstall.Result, 1),
+	}
+}
+
+func (j *fakeJob) Events() <-chan uninstall.Event { return j.events }
+func (j *fakeJob) RespondPassword(id uninstall.RequestID, password []byte) error {
+	j.mu.Lock()
+	j.passwordIDs = append(j.passwordIDs, id)
+	j.passwords = append(j.passwords, append([]byte(nil), password...))
+	j.mu.Unlock()
+	for i := range password {
+		password[i] = 0
+	}
+	return nil
+}
+func (j *fakeJob) CancelPassword(uninstall.RequestID) error { return nil }
+func (j *fakeJob) Cancel()                                  { j.finish(uninstall.Result{Cancelled: true}) }
+func (j *fakeJob) Wait() uninstall.Result                   { return <-j.result }
+func (j *fakeJob) finish(result uninstall.Result) {
+	j.once.Do(func() {
+		j.result <- result
+		close(j.result)
+		close(j.events)
+	})
+}
+
+func newTestModel(t *testing.T) (*model, *fakeUninstaller) {
+	t.Helper()
+	homebrew := &fakeHomebrew{packages: map[brew.Kind][]brew.Package{
+		brew.Cask: {
+			{Name: "Alpha", Version: "1.0", Kind: brew.Cask},
+			{Name: "Beta", Version: "2.0", Kind: brew.Cask},
+			{Name: "Gamma", Version: "3.0", Kind: brew.Cask},
+		},
+	}}
+	job := newFakeJob()
+	uninstaller := &fakeUninstaller{job: job}
+	loader := info.New(homebrew.Info)
+	root, _ := New(homebrew, loader, uninstaller)
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	for _, message := range immediateMessages(m.Init()) {
+		_, next := m.Update(message)
+		if _, ok := message.(listResultMsg); ok && next != nil {
+			result := next()
+			if _, ok := result.(info.Result); ok {
+				m.Update(result)
+			}
+		}
+	}
+	if m.loading {
+		t.Fatal("startup list did not complete")
+	}
+	return m, uninstaller
+}
+
+func immediateMessages(command tea.Cmd) []tea.Msg {
+	if command == nil {
+		return nil
+	}
+	message := command()
+	batch, ok := message.(tea.BatchMsg)
+	if !ok {
+		return []tea.Msg{message}
+	}
+	messages := make([]tea.Msg, 0, len(batch))
+	for _, command := range batch {
+		messages = append(messages, command())
+	}
+	return messages
+}
+
+func requireQuit(t *testing.T, command tea.Cmd) {
+	t.Helper()
+	if command == nil {
+		t.Fatal("expected tea.Quit, got nil")
+	}
+	if _, ok := command().(tea.QuitMsg); !ok {
+		t.Fatal("command did not return tea.QuitMsg")
+	}
+}
+
+func requireQuittingState(t *testing.T, m *model) {
+	t.Helper()
+	if m.mode != modeQuitting || m.status != "Quitting..." || !m.priority {
+		t.Fatalf("quitting state changed: mode=%v status=%q priority=%v", m.mode, m.status, m.priority)
+	}
+}
+
+func textKey(value string) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Text: value, Code: []rune(value)[0]})
+}
+
+func specialKey(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg(tea.Key{Code: code})
+}
+
+func TestSearchIsModeFirstSubstringAndNonWrapping(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(textKey("/"))
+	m.Update(textKey("E"))
+	m.Update(textKey("t"))
+	m.Update(textKey("A"))
+	m.Update(textKey("q"))
+	if m.mode != modeSearch || m.query != "EtAq" {
+		t.Fatalf("search did not consume normal-mode keys: mode=%v query=%q", m.mode, m.query)
+	}
+	if got := len(m.list.VisibleItems()); got != 0 {
+		t.Fatalf("filter matched %d rows, want 0", got)
+	}
+	m.Update(specialKey(tea.KeyBackspace))
+	if got := m.selectedPackage(); got == nil || got.Name != "Beta" {
+		t.Fatalf("case-insensitive substring selected %#v, want Beta", got)
+	}
+	m.Update(specialKey(tea.KeyDelete))
+	if m.query != "EtA" {
+		t.Fatalf("forward delete changed query to %q", m.query)
+	}
+	m.Update(specialKey(tea.KeyEscape))
+	if m.mode != modeNormal || m.query != "" || m.list.Index() != 0 {
+		t.Fatalf("escape did not clear/reset search: mode=%v query=%q index=%d", m.mode, m.query, m.list.Index())
+	}
+	m.Update(textKey("k"))
+	if m.list.Index() != 0 {
+		t.Fatalf("selection wrapped above first row to %d", m.list.Index())
+	}
+	m.Update(textKey("j"))
+	m.Update(textKey("j"))
+	m.Update(textKey("j"))
+	if m.list.Index() != 2 {
+		t.Fatalf("selection wrapped below final row to %d", m.list.Index())
+	}
+}
+
+func TestConfirmationRequiresExactLowercaseYAndStartsAsynchronously(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	m.Update(textKey("u"))
+	if m.mode != modeConfirm || m.confirmation == nil || m.confirmation.Name != "Alpha" {
+		t.Fatalf("confirmation snapshot not opened: mode=%v snapshot=%#v", m.mode, m.confirmation)
+	}
+	m.Update(textKey("Y"))
+	if m.mode != modeNormal || m.status != "Uninstall cancelled" || uninstaller.starts != 0 {
+		t.Fatalf("uppercase Y did not cancel exactly: mode=%v status=%q starts=%d", m.mode, m.status, uninstaller.starts)
+	}
+
+	m.Update(textKey("u"))
+	_, command := m.Update(textKey("y"))
+	if uninstaller.starts != 0 {
+		t.Fatal("Start ran inside Update")
+	}
+	if m.mode != modeUninstall || m.status != "Uninstalling Alpha..." || !m.spinnerActive {
+		t.Fatalf("start state not committed before command: mode=%v status=%q spinner=%v", m.mode, m.status, m.spinnerActive)
+	}
+	messages := immediateMessages(command)
+	if uninstaller.starts != 1 {
+		t.Fatalf("Start calls=%d, want 1 after command execution", uninstaller.starts)
+	}
+	for _, message := range messages {
+		if started, ok := message.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+	uninstaller.job.finish(uninstall.Result{Err: errors.New("brew failed")})
+}
+
+func TestPasswordDropsPasteUsesFreshMaskedInputAndSubmitsDirectly(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	m.Update(textKey("u"))
+	_, command := m.Update(textKey("y"))
+	for _, message := range immediateMessages(command) {
+		if started, ok := message.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+
+	request := uninstall.RequestID{1}
+	m.Update(jobEventMsg{id: m.operationID, event: uninstall.Event{Type: uninstall.PasswordRequested, RequestID: request}, open: true})
+	if m.mode != modePassword || m.password.Value() != "" || !m.password.Focused() {
+		t.Fatalf("password request did not create fresh focused input")
+	}
+	m.Update(textKey("密"))
+	m.Update(tea.PasteMsg{Content: "SECRET-PASTE"})
+	m.Update(specialKey(tea.KeyDelete))
+	if m.password.Value() != "密" {
+		t.Fatalf("paste/delete changed password value, got %q", m.password.Value())
+	}
+	m.Update(specialKey(tea.KeyEnter))
+	if m.mode != modeUninstall || m.password.Value() != "" || m.password.Focused() {
+		t.Fatal("submit did not immediately reset and blur password input")
+	}
+	uninstaller.job.mu.Lock()
+	got := string(uninstaller.job.passwords[0])
+	gotRequest := uninstaller.job.passwordIDs[0]
+	uninstaller.job.mu.Unlock()
+	if got != "密" || gotRequest != request || gotRequest == (uninstall.RequestID{}) {
+		t.Fatalf("submitted password=%q request=%x, want %q request=%x", got, gotRequest, "密", request)
+	}
+
+	m.Update(jobEventMsg{id: m.operationID, event: uninstall.Event{Type: uninstall.PasswordRequested, RequestID: uninstall.RequestID{2}}, open: true})
+	if m.password.Value() != "" || m.passwordAttempts != 2 {
+		t.Fatalf("retry was not fresh: value=%q attempts=%d", m.password.Value(), m.passwordAttempts)
+	}
+	uninstaller.job.Cancel()
+}
+
+func TestLoadingModesAcceptOnlySpecifiedQuitKeys(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.loading = true
+	m.loadPurpose = loadRefresh
+	m.Update(textKey("tab"))
+	if m.kind != brew.Cask {
+		t.Fatal("tab changed kind during refresh")
+	}
+	m.Update(textKey("q"))
+	if m.mode != modeQuitting {
+		t.Fatal("q did not enter supervised quitting during refresh")
+	}
+
+	m2, _ := newTestModel(t)
+	m2.loading = true
+	m2.loadPurpose = loadAfterUninstall
+	m2.mode = modeUninstall
+	m2.Update(textKey("q"))
+	if m2.mode != modeUninstall {
+		t.Fatal("q escaped post-uninstall reload")
+	}
+}
+
+func TestResizeCancelsUnsafeConfirmationAndActiveUninstall(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(textKey("u"))
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	if m.mode != modeNormal || m.confirmation != nil || m.status != "Terminal too small; uninstall cancelled" {
+		t.Fatalf("unsafe confirmation survived resize: mode=%v confirmation=%#v status=%q", m.mode, m.confirmation, m.status)
+	}
+
+	m2, uninstaller := newTestModel(t)
+	m2.Update(textKey("u"))
+	_, command := m2.Update(textKey("y"))
+	for _, message := range immediateMessages(command) {
+		if started, ok := message.(jobStartedMsg); ok {
+			m2.Update(started)
+		}
+	}
+	m2.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	if m2.cancelReason != cancelTerminal || m2.status != "Terminal too small; uninstall cancelled" {
+		t.Fatalf("unsafe uninstall was not cancelled: reason=%v status=%q", m2.cancelReason, m2.status)
+	}
+	uninstaller.job.Cancel()
+}
+
+func startFakeUninstall(t *testing.T, m *model, uninstaller *fakeUninstaller) {
+	t.Helper()
+	m.Update(textKey("u"))
+	_, command := m.Update(textKey("y"))
+	for _, message := range immediateMessages(command) {
+		if started, ok := message.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+	if m.job == nil || uninstaller.starts != 1 {
+		t.Fatalf("uninstall did not start: job=%v starts=%d", m.job != nil, uninstaller.starts)
+	}
+}
+
+func TestUninstallStartAndTerminalFailuresRestoreControls(t *testing.T) {
+	t.Run("start", func(t *testing.T) {
+		m, uninstaller := newTestModel(t)
+		uninstaller.err = errors.New("setup failed")
+		m.Update(textKey("u"))
+		_, command := m.Update(textKey("y"))
+		for _, message := range immediateMessages(command) {
+			if failed, ok := message.(jobStartFailedMsg); ok {
+				m.Update(failed)
+			}
+		}
+		if m.mode != modeNormal || m.status != "setup failed" || m.operation != nil {
+			t.Fatalf("start failure state: mode=%v status=%q operation=%#v", m.mode, m.status, m.operation)
+		}
+		m.Update(textKey("t"))
+		if m.themeIndex != 1 {
+			t.Fatal("normal controls remained disabled after start failure")
+		}
+	})
+
+	tests := []struct {
+		name   string
+		result uninstall.Result
+		status string
+	}{
+		{name: "command", result: uninstall.Result{Err: errors.New("brew failed")}, status: "brew failed"},
+		{name: "authentication", result: uninstall.Result{AuthFailed: true}, status: "Administrator authentication failed"},
+		{name: "authentication timeout", result: uninstall.Result{AuthTimedOut: true}, status: "Administrator authentication timed out"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, uninstaller := newTestModel(t)
+			startFakeUninstall(t, m, uninstaller)
+			uninstaller.job.finish(tt.result)
+			m.Update(jobResultMsg{id: m.operationID, result: tt.result})
+			if m.mode != modeNormal || m.loading || m.status != tt.status || m.operation != nil {
+				t.Fatalf("terminal failure state: mode=%v loading=%v status=%q operation=%#v", m.mode, m.loading, m.status, m.operation)
+			}
+			m.Update(textKey("t"))
+			if m.themeIndex != 1 {
+				t.Fatal("normal controls remained disabled after terminal failure")
+			}
+		})
+	}
+}
+
+func TestUninstallSuccessWaitsForReloadAndKeepsTargetSnapshot(t *testing.T) {
+	tests := []struct {
+		name       string
+		reloadErr  error
+		wantStatus string
+	}{
+		{name: "reload success", wantStatus: "Uninstalled Alpha"},
+		{name: "reload failure", reloadErr: errors.New("reload failed"), wantStatus: "reload failed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, uninstaller := newTestModel(t)
+			startFakeUninstall(t, m, uninstaller)
+			homebrew := m.homebrew.(*fakeHomebrew)
+			homebrew.packages[brew.Cask] = []brew.Package{{Name: "Beta", Version: "2.1", Kind: brew.Cask}}
+			homebrew.err = tt.reloadErr
+
+			uninstaller.job.finish(uninstall.Result{})
+			_, reload := m.Update(jobResultMsg{id: m.operationID, result: uninstall.Result{}})
+			if m.mode != modeUninstall || !m.loading || m.loadPurpose != loadAfterUninstall {
+				t.Fatalf("success exposed before reload: mode=%v loading=%v purpose=%v", m.mode, m.loading, m.loadPurpose)
+			}
+			kind, theme, index, starts := m.kind, m.themeIndex, m.list.Index(), uninstaller.starts
+			for _, key := range []tea.KeyPressMsg{textKey("q"), textKey("tab"), textKey("u"), textKey("j"), textKey("t")} {
+				m.Update(key)
+			}
+			if m.kind != kind || m.themeIndex != theme || m.list.Index() != index || uninstaller.starts != starts || m.mode != modeUninstall {
+				t.Fatal("controls were active during post-uninstall reload")
+			}
+
+			var listMessage *listResultMsg
+			for _, message := range immediateMessages(reload) {
+				if result, ok := message.(listResultMsg); ok {
+					resultCopy := result
+					listMessage = &resultCopy
+				}
+			}
+			if listMessage == nil {
+				t.Fatal("reload command did not return a typed list result")
+			}
+			_, infoCommand := m.Update(*listMessage)
+			if infoCommand != nil {
+				if result, ok := infoCommand().(info.Result); ok {
+					m.Update(result)
+				}
+			}
+			if m.mode != modeNormal || m.loading || m.status != tt.wantStatus || m.operation != nil {
+				t.Fatalf("reload terminal state: mode=%v loading=%v status=%q operation=%#v", m.mode, m.loading, m.status, m.operation)
+			}
+			if len(uninstaller.started) != 1 || uninstaller.started[0].Name != "Alpha" {
+				t.Fatalf("uninstall target mutated: %#v", uninstaller.started)
+			}
+			if tt.reloadErr == nil {
+				selected := m.selectedPackage()
+				if selected == nil || selected.Name != "Beta" {
+					t.Fatalf("reloaded inventory=%#v, want Beta", selected)
+				}
+			}
+		})
+	}
+}
+
+func TestQuitCancelsActiveAndPendingInfoBeforeCompletingResult(t *testing.T) {
+	started := make(chan string, 2)
+	loader := info.New(func(ctx context.Context, pkg brew.Package) (string, error) {
+		started <- pkg.Name
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	homebrew := &fakeHomebrew{}
+	root, _ := New(homebrew, loader, &fakeUninstaller{})
+	m := root.(*model)
+	m.loading = false
+	m.setPackages([]brew.Package{
+		{Name: "Alpha", Kind: brew.Cask},
+		{Name: "Beta", Kind: brew.Cask},
+	}, 0)
+
+	active := m.selectInfo()
+	result := make(chan tea.Msg, 1)
+	go func() { result <- active() }()
+	select {
+	case name := <-started:
+		if name != "Alpha" {
+			t.Fatalf("active info target=%q, want Alpha", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active info did not start")
+	}
+	m.list.Select(1)
+	if pending := m.selectInfo(); pending != nil {
+		t.Fatal("pending info unexpectedly started beside active request")
+	}
+
+	_, quit := m.Update(textKey("q"))
+	if m.mode != modeQuitting || quit != nil {
+		t.Fatal("quit did not wait for the active typed info result")
+	}
+	var completed tea.Msg
+	select {
+	case completed = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("active info did not observe synchronous cancellation")
+	}
+	_, quit = m.Update(completed)
+	requireQuit(t, quit)
+	requireQuittingState(t, m)
+	select {
+	case name := <-started:
+		t.Fatalf("pending info started after quit for %q", name)
+	default:
+	}
+	select {
+	case <-loader.Done():
+	case <-time.After(time.Second):
+		t.Fatal("loader remained active after cancelled result")
+	}
+}
+
+func TestQuitCancelsPendingInfoPromotedByRacingResult(t *testing.T) {
+	started := make(chan string, 2)
+	releaseAlpha := make(chan struct{})
+	loader := info.New(func(ctx context.Context, pkg brew.Package) (string, error) {
+		started <- pkg.Name
+		if pkg.Name == "Alpha" {
+			<-releaseAlpha
+			return "alpha details", nil
+		}
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	root, _ := New(&fakeHomebrew{}, loader, &fakeUninstaller{})
+	m := root.(*model)
+	m.loading = false
+	m.setPackages([]brew.Package{
+		{Name: "Alpha", Kind: brew.Cask},
+		{Name: "Beta", Kind: brew.Cask},
+	}, 0)
+
+	activeResult := make(chan tea.Msg, 1)
+	active := m.selectInfo()
+	go func() { activeResult <- active() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("active info did not start")
+	}
+	m.list.Select(1)
+	m.selectInfo()
+	close(releaseAlpha)
+
+	var completed tea.Msg
+	select {
+	case completed = <-activeResult:
+	case <-time.After(time.Second):
+		t.Fatal("active info did not complete")
+	}
+	_, promoted := m.Update(completed)
+	if promoted == nil {
+		t.Fatal("racing result did not promote pending info")
+	}
+	promotedResult := make(chan tea.Msg, 1)
+	go func() { promotedResult <- promoted() }()
+	select {
+	case name := <-started:
+		if name != "Beta" {
+			t.Fatalf("promoted info target=%q, want Beta", name)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("promoted info did not start")
+	}
+
+	_, quit := m.Update(textKey("q"))
+	if quit != nil {
+		t.Fatal("quit did not wait for promoted typed info result")
+	}
+	var cancelled tea.Msg
+	select {
+	case cancelled = <-promotedResult:
+	case <-time.After(time.Second):
+		t.Fatal("promoted info did not observe quit cancellation")
+	}
+	_, quit = m.Update(cancelled)
+	requireQuit(t, quit)
+	requireQuittingState(t, m)
+	select {
+	case name := <-started:
+		t.Fatalf("pending info restarted after quit for %q", name)
+	default:
+	}
+}
+
+func TestQuitWaitsForTypedListResult(t *testing.T) {
+	m, _ := newTestModel(t)
+	homebrew := m.homebrew.(*fakeHomebrew)
+	homebrew.listStarted = make(chan struct{})
+	result := make(chan tea.Msg, 1)
+	go func() { result <- m.startList(loadRefresh, m.list.Index())() }()
+	select {
+	case <-homebrew.listStarted:
+	case <-time.After(time.Second):
+		t.Fatal("list request did not start")
+	}
+
+	_, quit := m.Update(textKey("q"))
+	if quit != nil {
+		t.Fatal("quit returned before typed list result")
+	}
+	var completed tea.Msg
+	select {
+	case completed = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("list request did not observe synchronous cancellation")
+	}
+	_, quit = m.Update(completed)
+	requireQuit(t, quit)
+	requireQuittingState(t, m)
+}
+
+func TestQuitWaitsForTypedStartFailure(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	uninstaller.startStarted = make(chan struct{})
+	uninstaller.err = errors.New("cancelled start")
+	m.Update(textKey("u"))
+	_, command := m.Update(textKey("y"))
+	batch := command().(tea.BatchMsg)
+	results := make(chan tea.Msg, len(batch))
+	for _, command := range batch {
+		go func(command tea.Cmd) { results <- command() }(command)
+	}
+	select {
+	case <-uninstaller.startStarted:
+	case <-time.After(time.Second):
+		t.Fatal("uninstall start did not begin")
+	}
+
+	if _, quit := m.Update(SignalMsg{ExitCode: 143}); quit != nil {
+		t.Fatal("quit returned before typed start failure")
+	}
+	for {
+		message := <-results
+		if failed, ok := message.(jobStartFailedMsg); ok {
+			_, quit := m.Update(failed)
+			requireQuit(t, quit)
+			requireQuittingState(t, m)
+			break
+		}
+	}
+}
+
+func TestQuitWaitsForRacedStartAndTypedJobResult(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	uninstaller.startStarted = make(chan struct{})
+	m.Update(textKey("u"))
+	_, command := m.Update(textKey("y"))
+	batch := command().(tea.BatchMsg)
+	results := make(chan tea.Msg, len(batch))
+	for _, command := range batch {
+		go func(command tea.Cmd) { results <- command() }(command)
+	}
+	select {
+	case <-uninstaller.startStarted:
+	case <-time.After(time.Second):
+		t.Fatal("uninstall start did not begin")
+	}
+
+	if _, quit := m.Update(SignalMsg{ExitCode: 143}); quit != nil {
+		t.Fatal("quit returned before typed start result")
+	}
+	var started jobStartedMsg
+	for {
+		message := <-results
+		if value, ok := message.(jobStartedMsg); ok {
+			started = value
+			break
+		}
+	}
+	_, waitResult := m.Update(started)
+	if waitResult == nil {
+		t.Fatal("raced successful start did not schedule its typed job result")
+	}
+	result, ok := waitResult().(jobResultMsg)
+	if !ok {
+		t.Fatal("raced job wait did not return jobResultMsg")
+	}
+	_, quit := m.Update(result)
+	requireQuittingState(t, m)
+	requireQuit(t, quit)
+}
+
+func TestQuitWaitsForTypedActiveJobResult(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	startFakeUninstall(t, m, uninstaller)
+	if _, quit := m.Update(SignalMsg{ExitCode: 143}); quit != nil {
+		t.Fatal("quit returned before active job result")
+	}
+	result, ok := waitJobResult(m.operationID, m.jobResult)().(jobResultMsg)
+	if !ok {
+		t.Fatal("active job wait did not return jobResultMsg")
+	}
+	_, quit := m.Update(result)
+	requireQuittingState(t, m)
+	requireQuit(t, quit)
+}
+
+func TestFatalCleanupAndSignalsSetSupervisedExitCodes(t *testing.T) {
+	t.Run("fatal cleanup renders exact status", func(t *testing.T) {
+		m, uninstaller := newTestModel(t)
+		startFakeUninstall(t, m, uninstaller)
+		result := uninstall.Result{CleanupErr: errors.New("fatal uninstall cleanup failure:\nworkers remain")}
+		uninstaller.job.finish(result)
+		_, quit := m.Update(jobResultMsg{id: m.operationID, result: result})
+		if m.mode != modeQuitting {
+			t.Fatalf("mode=%v, want quitting", m.mode)
+		}
+		requireQuit(t, quit)
+		if want := "Uninstall cleanup failed: fatal uninstall cleanup failure: workers remain"; m.status != want {
+			t.Fatalf("status=%q, want %q", m.status, want)
+		}
+		if !m.priority || m.supervisor.ExitCode() != 1 {
+			t.Fatal("cleanup failure was not retained as a priority fatal result")
+		}
+	})
+
+	t.Run("fatal cleanup while quitting", func(t *testing.T) {
+		m, uninstaller := newTestModel(t)
+		startFakeUninstall(t, m, uninstaller)
+		if _, quit := m.Update(SignalMsg{ExitCode: 143}); quit != nil {
+			t.Fatal("quit returned before fatal typed job result")
+		}
+		result := uninstall.Result{CleanupErr: errors.New("fatal uninstall cleanup failure: workers remain")}
+		uninstaller.job.finish(result)
+		_, quit := m.Update(jobResultMsg{id: m.operationID, result: result})
+		requireQuittingState(t, m)
+		requireQuit(t, quit)
+		if got := m.supervisor.ExitCode(); got != 1 {
+			t.Fatalf("exit code=%d, want 1", got)
+		}
+	})
+
+	t.Run("SIGTERM", func(t *testing.T) {
+		m, _ := newTestModel(t)
+		_, quit := m.Update(SignalMsg{ExitCode: 143})
+		requireQuit(t, quit)
+		if got := m.supervisor.ExitCode(); got != 143 {
+			t.Fatalf("exit code=%d, want 143", got)
+		}
+	})
+
+	t.Run("SIGINT", func(t *testing.T) {
+		m, _ := newTestModel(t)
+		_, interrupt := m.Update(SignalMsg{ExitCode: 130})
+		if interrupt == nil {
+			t.Fatal("SIGINT did not complete")
+		}
+		if _, ok := interrupt().(tea.InterruptMsg); !ok {
+			t.Fatal("SIGINT did not return tea.InterruptMsg")
+		}
+		if got := m.supervisor.ExitCode(); got != 130 {
+			t.Fatalf("exit code=%d, want 130", got)
+		}
+	})
+}
+
+type supervisorJob struct {
+	cancelled chan struct{}
+	once      sync.Once
+}
+
+func newSupervisorJob() *supervisorJob {
+	return &supervisorJob{cancelled: make(chan struct{})}
+}
+
+func (*supervisorJob) Events() <-chan uninstall.Event { return nil }
+func (*supervisorJob) RespondPassword(uninstall.RequestID, []byte) error {
+	return nil
+}
+func (*supervisorJob) CancelPassword(uninstall.RequestID) error { return nil }
+func (j *supervisorJob) Cancel() {
+	j.once.Do(func() { close(j.cancelled) })
+}
+func (*supervisorJob) Wait() uninstall.Result { return uninstall.Result{} }
+
+func TestSupervisorCancelsEverythingBeforeConcurrentWaitAndAwaitsRacedJob(t *testing.T) {
+	infoStarted, infoCancelled := make(chan struct{}), make(chan struct{})
+	loader := info.New(func(ctx context.Context, _ brew.Package) (string, error) {
+		close(infoStarted)
+		<-ctx.Done()
+		close(infoCancelled)
+		return "", ctx.Err()
+	})
+	infoCommand := loader.Select(&brew.Package{Name: "Alpha", Kind: brew.Cask})
+	go infoCommand()
+	select {
+	case <-infoStarted:
+	case <-time.After(time.Second):
+		t.Fatal("info request did not start")
+	}
+
+	supervisor := &Supervisor{info: loader}
+	listCancelled, startCancelled := make(chan struct{}), make(chan struct{})
+	listDone, startDone, jobDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var listOnce, startOnce sync.Once
+	supervisor.setList(func() { listOnce.Do(func() { close(listCancelled) }) }, listDone)
+	supervisor.setStart(func() { startOnce.Do(func() { close(startCancelled) }) }, startDone)
+	job := newSupervisorJob()
+	supervisor.setJob(job, jobDone)
+
+	cleaned := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		cleaned <- supervisor.Cleanup(ctx)
+	}()
+	for name, cancelled := range map[string]<-chan struct{}{
+		"list":  listCancelled,
+		"info":  infoCancelled,
+		"start": startCancelled,
+		"job":   job.cancelled,
+	} {
+		select {
+		case <-cancelled:
+		case <-time.After(time.Second):
+			t.Fatalf("%s was not cancelled before waits completed", name)
+		}
+	}
+
+	raced := newSupervisorJob()
+	racedDone := make(chan struct{})
+	supervisor.setJob(raced, racedDone)
+	select {
+	case <-raced.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("job registered during cleanup was not cancelled")
+	}
+	close(listDone)
+	close(startDone)
+	close(jobDone)
+	select {
+	case err := <-cleaned:
+		t.Fatalf("cleanup returned before raced job completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(racedDone)
+	select {
+	case err := <-cleaned:
+		if err != nil {
+			t.Fatalf("Cleanup() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not await raced job")
+	}
+}

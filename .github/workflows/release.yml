@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os:
+          - macos-14
+          - macos-15-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Derive version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Create release assets
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          archive="lazybrew-${version}.tar.gz"
+          git archive --format=tar --prefix="lazybrew-${version}/" HEAD | gzip -n > "$archive"
+          sha256sum "$archive" > checksums.txt
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          gh release create "$GITHUB_REF_NAME" \
+            "lazybrew-${version}.tar.gz" checksums.txt \
+            --title "lazybrew ${version}" \
+            --generate-notes
+
+  tap:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          path: source
+      - name: Check out tap
+        uses: actions/checkout@v4
+        with:
+          repository: todor-a/homebrew-tap
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: tap
+      - name: Download and verify release archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${{ needs.release.outputs.version }}"
+          archive="lazybrew-${version}.tar.gz"
+          mkdir release
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$archive" \
+            --pattern checksums.txt \
+            --dir release
+          (cd release && sha256sum --check --strict checksums.txt)
+          sha256sum "release/$archive" | cut -d ' ' -f 1 > release/archive.sha256
+      - name: Update tap formula
+        shell: bash
+        run: |
+          version="${{ needs.release.outputs.version }}"
+          sha256="$(cat release/archive.sha256)"
+          ruby -e '
+            template = File.read(ARGV[0])
+            output = template.gsub("@VERSION@", ARGV[1]).gsub("@SHA256@", ARGV[2])
+            abort "formula placeholders were not replaced" if output.include?("@VERSION@") || output.include?("@SHA256@")
+            File.write(ARGV[3], output)
+          ' source/.github/homebrew/lazybrew.rb "$version" "$sha256" tap/Formula/lazybrew.rb
+
+          cd tap
+          if [[ -z "$(git status --porcelain -- Formula/lazybrew.rb)" ]]; then
+            echo "Formula already up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/lazybrew.rb
+          git commit -m "lazybrew ${version}"
+          git push origin HEAD:main
