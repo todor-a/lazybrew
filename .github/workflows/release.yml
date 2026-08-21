@@ -66,7 +66,12 @@ jobs:
           '
 
           cd tap
-          if [[ -z "$(git status --porcelain -- Casks/lazybrew.rb Formula/lazybrew.rb tap_migrations.json)" ]]; then
+          # Stage without naming paths: `git add -A -- <pathspec>` exits 128 when a
+          # pathspec matches nothing, and Formula/lazybrew.rb stopped existing once
+          # the formula-to-cask migration landed, so naming it broke every release
+          # after the one that removed it. The checkout is a fresh clone and this
+          # step wrote every change in it, so there is nothing else to pick up.
+          if [[ -z "$(git status --porcelain)" ]]; then
             echo "Tap already up to date"
             exit 0
           fi
@@ -74,6 +79,6 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A -- Casks/lazybrew.rb Formula/lazybrew.rb tap_migrations.json
+          git add -A
           git commit -m "lazybrew ${version}"
           git push origin HEAD:main
