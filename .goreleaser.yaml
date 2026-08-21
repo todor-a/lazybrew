@@ -29,7 +29,38 @@ checksum:
   name_template: checksums.txt
 
 changelog:
-  use: github-native
+  # Not github-native: that derives notes from merged pull requests, and this
+  # repository lands everything as direct commits, so every release body was just
+  # a compare link. Read the commits instead — they are Conventional Commits, so
+  # they group cleanly. The workflow already checks out with fetch-depth 0, which
+  # this needs to see history between tags.
+  use: git
+  sort: asc
+  groups:
+    - title: Features
+      regexp: '\bfeat(\([^)]+\))?!?:'
+      order: 0
+    - title: Fixes
+      regexp: '\bfix(\([^)]+\))?!?:'
+      order: 1
+    - title: Performance
+      regexp: '\bperf(\([^)]+\))?!?:'
+      order: 2
+    - title: Build and release
+      regexp: '\b(build|ci)(\([^)]+\))?!?:'
+      order: 3
+    - title: Documentation
+      regexp: '\bdocs(\([^)]+\))?!?:'
+      order: 4
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - '\btest(\([^)]+\))?!?:'
+      - '\bchore(\([^)]+\))?!?:'
+      - '\bstyle(\([^)]+\))?!?:'
+      - '\brefactor(\([^)]+\))?!?:'
+      - '^Merge '
 
 release:
   name_template: 'lazybrew {{ .Version }}'
