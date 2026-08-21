@@ -5,8 +5,17 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
+  # The manual path. It replaces a "v*" tag trigger, which became unsafe once
+  # release-please authenticated with a token that does trigger workflows: the
+  # tag it creates would start a second run whose release job also matched, so
+  # one release ran GoReleaser twice against the same tag and tap. Dispatching
+  # explicitly cannot collide with the automatic path.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to release again
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -44,19 +53,29 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
+          # A personal access token, not the default GITHUB_TOKEN. Resources
+          # created with GITHUB_TOKEN do not trigger workflows, so the release
+          # pull request never got its own checks and no check could be made
+          # required without deadlocking it.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
   # Builds and publishes artifacts into the release that already exists.
   #
-  # This job lives in the same workflow as release-please on purpose. Anything
-  # release-please creates with the default GITHUB_TOKEN - tag or release - does
-  # not trigger another workflow run, so a separate tag-triggered workflow would
-  # silently never fire. Depending on its output instead of on a tag event keeps
-  # this working without a personal access token.
+  # This job lives in the same workflow as release-please, and keys off its
+  # output rather than off a tag event, for two reasons that have swapped over.
   #
-  # The tag condition is the manual escape hatch: pushing a v* tag by hand still
-  # releases, for when release-please needs to be bypassed.
+  # Under the default GITHUB_TOKEN nothing release-please created triggered a
+  # workflow, so a separate tag-triggered workflow would silently never fire.
+  # Now that it authenticates with a personal access token the tag does trigger,
+  # which is the opposite hazard: a tag trigger here would start a second run
+  # whose release job also matched, and one release would build and publish
+  # twice against the same tag and tap. Keying off the output is correct under
+  # both, and is the only thing that was correct under both.
+  #
+  # The dispatch condition is the manual escape hatch, for when release-please
+  # needs to be bypassed.
   release:
     needs:
       - test
@@ -64,7 +83,7 @@ jobs:
     if: >-
       always() && needs.test.result == 'success' &&
       (needs.release-please.outputs.release_created == 'true' ||
-      startsWith(github.ref, 'refs/tags/v'))
+      github.event_name == 'workflow_dispatch')
     runs-on: macos-14
     permissions:
       contents: write
@@ -73,7 +92,7 @@ jobs:
         with:
           # Check out the tag release-please just created, not the branch head,
           # so GoReleaser derives the version from it. Full history for the tag.
-          ref: ${{ needs.release-please.outputs.tag_name || github.ref }}
+          ref: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
           fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
@@ -94,7 +113,7 @@ jobs:
       - name: Update tap cask
         shell: bash
         env:
-          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name || github.ref_name }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
         run: |
           mkdir -p tap/Casks
           cp dist/homebrew/Casks/lazybrew.rb tap/Casks/lazybrew.rb
