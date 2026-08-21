@@ -1,0 +1,73 @@
+name: Pull request
+
+on:
+  pull_request:
+    # Rerun when the title changes, not just on new commits: the title is what is
+    # being validated, and it is editable after opening.
+    types:
+      - opened
+      - edited
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      # The pull request title, not the individual commits. Merges here are
+      # squashes titled from the pull request, so the title is the string that
+      # becomes the commit on main, and release-please reads that commit to decide
+      # the next version and write the changelog. Validating commits that never
+      # reach main would check the wrong thing.
+      #
+      # Hand-rolled rather than a third-party action: the accepted types have to
+      # stay identical to the changelog-sections in release-please-config.json,
+      # and `chore` in particular must stay accepted because release-please titles
+      # its own release pull requests `chore(main): release x.y.z`.
+      - name: Check the title is a Conventional Commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # The pattern is held in a variable and used unquoted on purpose. Written
+          # inline, bash consumes the backslashes before the regex engine sees
+          # them and every scoped title fails to match - including
+          # "chore(main): release x.y.z", which would block every release.
+          re='^(feat|fix|perf|build|ci|docs|refactor|test|style|chore|revert)(\([a-z0-9._/-]+\))?!?: .+'
+          if [[ "$TITLE" =~ $re ]]; then
+            echo "OK: $TITLE"
+            exit 0
+          fi
+
+          echo "::error title=Pull request title is not a Conventional Commit::$TITLE"
+          cat <<'MSG'
+          The title becomes the commit message on main, and release-please reads it
+          to decide the next version and write the changelog entry. It must look
+          like:
+
+            <type>[optional scope][!]: <description>
+
+          Accepted types:
+            feat      a user-visible capability          (bumps the minor version)
+            fix       a defect repaired                  (bumps the patch version)
+            perf      faster or lighter, same behaviour
+            build     build, packaging, or release tooling
+            ci        continuous integration only
+            docs      documentation only
+            refactor  restructuring with no behaviour change
+            test      tests only
+            style     formatting only
+            chore     anything else
+            revert    undoing an earlier change
+
+          Append ! for a breaking change, and add a scope in parentheses if it
+          helps: feat(ui): add a list scrollbar
+
+          Examples:
+            feat: add a size column to the package list
+            fix(uninstall): join workers before restoring seams
+            build!: drop support for Intel macOS
+          MSG
+          exit 1
