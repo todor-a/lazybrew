@@ -18,9 +18,15 @@ type fakeHomebrew struct {
 	packages    map[brew.Kind][]brew.Package
 	err         error
 	listStarted chan struct{}
+	listCalls   map[brew.Kind]int
+	dependents  map[string][]string
 }
 
 func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package, error) {
+	if f.listCalls == nil {
+		f.listCalls = make(map[brew.Kind]int)
+	}
+	f.listCalls[kind]++
 	if f.listStarted != nil {
 		close(f.listStarted)
 		<-ctx.Done()
@@ -36,6 +42,13 @@ func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package
 
 func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
 	return "details for " + pkg.Name, nil
+}
+
+func (f *fakeHomebrew) Uses(_ context.Context, pkg brew.Package) ([]string, error) {
+	if pkg.Kind != brew.Formula {
+		return nil, errors.New("dependents are only defined for formulae")
+	}
+	return f.dependents[pkg.Name], nil
 }
 
 type fakeUninstaller struct {
@@ -833,5 +846,107 @@ func TestSupervisorCancelsEverythingBeforeConcurrentWaitAndAwaitsRacedJob(t *tes
 		}
 	case <-time.After(time.Second):
 		t.Fatal("cleanup did not await raced job")
+	}
+}
+
+func drainList(t *testing.T, m *model, command tea.Cmd) {
+	t.Helper()
+	for _, message := range immediateMessages(command) {
+		_, next := m.Update(message)
+		if _, ok := message.(listResultMsg); ok && next != nil {
+			if result, ok := next().(info.Result); ok {
+				m.Update(result)
+			}
+		}
+	}
+}
+
+func TestKindSwitchServesCachedListWithoutReshelling(t *testing.T) {
+	homebrew := &fakeHomebrew{packages: map[brew.Kind][]brew.Package{
+		brew.Cask:    {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
+		brew.Formula: {{Name: "zlib", Version: "1.3", Kind: brew.Formula}},
+	}}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+	if m.loading {
+		t.Fatal("startup list did not complete")
+	}
+	if got := homebrew.listCalls[brew.Cask]; got != 1 {
+		t.Fatalf("startup cask list calls=%d, want 1", got)
+	}
+
+	drainList(t, m, m.switchKind())
+	if m.kind != brew.Formula || homebrew.listCalls[brew.Formula] != 1 {
+		t.Fatalf("first switch: kind=%q formula calls=%d, want one miss", m.kind, homebrew.listCalls[brew.Formula])
+	}
+
+	command := m.switchKind()
+	if m.loading {
+		t.Fatal("cached switch entered a loading state")
+	}
+	if got := len(m.list.Items()); got != 1 {
+		t.Fatalf("cached switch rendered %d items in the same frame, want 1", got)
+	}
+	if got := m.list.Items()[0].(packageItem).packageValue.Name; got != "Alpha" {
+		t.Fatalf("cached switch showed %q, want the cached cask", got)
+	}
+	drainList(t, m, command)
+	if got := homebrew.listCalls[brew.Cask]; got != 1 {
+		t.Fatalf("cached switch re-shelled brew list: cask calls=%d, want 1", got)
+	}
+
+	drainList(t, m, m.switchKind())
+	if got := homebrew.listCalls[brew.Formula]; got != 1 {
+		t.Fatalf("switching back re-shelled brew list: formula calls=%d, want 1", got)
+	}
+}
+
+func TestEmptyKindIsCachedRatherThanReshelledEverySwitch(t *testing.T) {
+	homebrew := &fakeHomebrew{packages: map[brew.Kind][]brew.Package{
+		brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
+	}}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	drainList(t, m, m.switchKind())
+	if got := len(m.list.Items()); got != 0 {
+		t.Fatalf("empty formula list has %d items, want 0", got)
+	}
+	drainList(t, m, m.switchKind())
+	drainList(t, m, m.switchKind())
+	if got := homebrew.listCalls[brew.Formula]; got != 1 {
+		t.Fatalf("empty kind re-shelled on every switch: formula calls=%d, want 1", got)
+	}
+}
+
+func TestRefreshDropsTheWholeListCache(t *testing.T) {
+	homebrew := &fakeHomebrew{packages: map[brew.Kind][]brew.Package{
+		brew.Cask:    {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
+		brew.Formula: {{Name: "zlib", Version: "1.3", Kind: brew.Formula}},
+	}}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+	drainList(t, m, m.switchKind())
+	drainList(t, m, m.switchKind())
+	if len(m.listCache) != 2 {
+		t.Fatalf("cache holds %d kinds before refresh, want 2", len(m.listCache))
+	}
+
+	drainList(t, m, m.updateNormal(tea.KeyPressMsg{Code: 'r'}))
+	if _, ok := m.listCache[brew.Formula]; ok {
+		t.Fatal("refresh left the inactive kind cached")
+	}
+	if _, ok := m.listCache[brew.Cask]; !ok {
+		t.Fatal("refresh did not repopulate the refreshed kind")
+	}
+	drainList(t, m, m.switchKind())
+	if got := homebrew.listCalls[brew.Formula]; got != 2 {
+		t.Fatalf("switch after refresh served stale cache: formula calls=%d, want 2", got)
 	}
 }

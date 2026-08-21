@@ -48,12 +48,28 @@ Package identity and the package-info cache key are `(kind, name)`. Version is d
 
 ### Active kind
 
-**[CURRENT/PARITY]** Startup selects `cask`. The two list labels are:
+**[CURRENT/PARITY]** Startup selects `cask`.
 
-- `Apps [casks]` for `cask`
-- `Formulae [formula]` for `formula`
+**[REWRITE ADDITION]** The header renders a tab bar naming both lists, not just the active one, and brackets the active one. The two exact labels are:
 
-Successful list status is `<count> casks installed` or `<count> formulas installed`.
+- `[ Apps ]    Formulae  ` for `cask`
+- `  Apps    [ Formulae ]` for `formula`
+
+Both labels are 22 cells wide. `Apps` occupies a fixed 8-cell slot at cells 1 through 8 and `Formulae` a fixed 12-cell slot at cells 11 through 22, with the bracket columns reserved on both sides, so switching swaps the brackets without shifting either name.
+
+Brackets, not a `>` marker: `>` is what the package list uses for its selected row, and `Apps > Formulae` reads as a breadcrumb path rather than a choice between two tabs. Brackets need no color, so the cue survives monochrome themes and the header row keeps its single style, never nesting styles for the active tab.
+
+The parity labels `Apps [casks]` and `Formulae [formula]` are replaced. They named only the active list, mismatched plurality between the two brackets, and paired a friendly name against a Homebrew term.
+
+The list count is `<total> casks installed` or `<total> formulae installed`.
+
+**[REWRITE ADDITION]** The count is computed at render time from the live list, not frozen into the event status slot when a list result lands. With a query active it reports the filtered figure instead: `<shown> of <total> casks match` or `<shown> of <total> formulae match`. An empty list reports no count at all, because the list pane's own `No packages found` already says that and a failed load would otherwise read as `0 casks installed`.
+
+Parity stored the total in the status slot on list success, so it went stale two ways: a query typed after the load left the total unchanged, and a query carried across a kind switch reported the new list's unfiltered total beside a filtered pane. Both now follow the list.
+
+A priority status still owns the whole row per composition rows 1 through 3, so a post-uninstall `Uninstalled <name>` shows no count until priority clears. That is unchanged and intentional.
+
+**[REWRITE ADDITION]** The Homebrew plural is spelled `formulae` in every status string. Parity's `formulas` is replaced so the header, status, and row `kind` column no longer disagree.
 
 ## 4. Current feature set and exact keys
 
@@ -66,7 +82,7 @@ Key handling is mode-first. A modal mode receives ordinary keys before the under
 | `up`, `k` | Move selection up one visible row. Clamp at the first row; never wrap. | **[CURRENT/PARITY]** |
 | `down`, `j` | Move selection down one visible row. Clamp at the last row; never wrap. | **[CURRENT/PARITY]** |
 | `/`, `s`, `S` | Enter search-edit mode with the current query. | **[CURRENT/PARITY]** |
-| `tab` | Switch cask ↔ formula, reset selection and scroll offset to zero, reload that kind, then target its selected package for info. The query remains active. | **[CURRENT/PARITY]** |
+| `tab` | Switch cask ↔ formula, reset selection and scroll offset to zero, load that kind from the section 8 list cache or from `brew list` on a miss, then target its selected package for info. The query remains active, so the target list arrives already filtered. | **[CURRENT/PARITY]** plus cache **[REWRITE ADDITION]** |
 | `u`, `U` | Open confirmation for the selected package if one exists and the safety-fit check passes. With no selected package, do nothing. | **[CURRENT/PARITY]** plus centered dialog **[REWRITE ADDITION]** |
 | `t`, `T` | Cycle to the next theme and set status to `Theme: <name>`. | **[CURRENT/PARITY]** |
 | `r`, `R` | Perform the refresh contract in section 8. | **[CURRENT/PARITY]** |
@@ -80,9 +96,10 @@ Search is case-insensitive substring matching against `name + " " + version + " 
 
 | Keys | Result |
 |---|---|
-| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `r`, `s`, `/`, and `tab` have no global meaning while editing. |
+| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `r`, `s`, and `/` have no global meaning while editing. |
 | `backspace`, `ctrl+h` | Remove the final query rune if one exists. Match a Bubble Tea v2 `KeyBackspace`/`backspace` event; also accept `ctrl+h` if an enhanced keyboard protocol delivers it distinctly. |
 | `enter` | Accept the query, leave it active, and return to normal mode. |
+| `tab` | **[REWRITE ADDITION]** Perform the normal-mode `tab` kind switch and return to normal mode. Parity ignored `tab` here, which made the advertised switch key silently dead while a query was being typed. Search mode is left before the load starts rather than when its result lands, so the mode change is visible immediately; the query is preserved and the target list arrives filtered. |
 | `esc` | Clear the query, reset selection and scroll offset to zero, and return to normal mode. |
 
 Each actual query edit resets selection and scroll offset to zero, clamps selection against the new filtered result, and retargets package info. Enter alone does not reset selection. All other non-printable keys are ignored.
@@ -131,6 +148,9 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | Info | formula | `brew`, `info`, `--formula`, `<name>` |
 | Uninstall | cask | `brew`, `uninstall`, `--cask`, `<confirmed-name>` |
 | Uninstall | formula | `brew`, `uninstall`, `--formula`, `<confirmed-name>` |
+| Dependents **[REWRITE ADDITION]** | formula | `brew`, `uses`, `--installed`, `<name>` |
+
+**[REWRITE ADDITION]** There is no cask form of the dependents vector, and one must not be added. `brew uses` resolves its argument as a formula, so a cask token makes it warn about an unknown formula and report nothing; a cask must never be allowed to read as "nothing depends on this". `Uses` rejects a non-formula kind before starting any process, and applies the same package-name validator as `Info`, reporting `Unsafe package name; dependents refused`. Its output is one installed formula name per nonblank line.
 
 The command adapter resolves `brew` through the child `PATH` without invoking a shell, then starts that executable with the remaining arguments exactly as listed. It must not concatenate a command string, invoke `sh -c`, add implicit flags, or substitute a package value not returned by the active inventory.
 
@@ -189,20 +209,32 @@ Do not use Huh or another modal package. `View` is pure: it renders state and mu
 **[CURRENT/PARITY]** At 32×9 or larger, the screen contains:
 
 1. A full outer border.
-2. Header row: `lazybrew [<theme>]  <active-list>  Tab: switch`.
+2. Header row: the section 3 list tab bar, alone. **[REWRITE ADDITION]** Parity rendered `lazybrew [<theme>]  <active-list>  Tab: switch`; all three parts around the tab bar are removed. The app name is redundant on a screen the user just launched. The theme name is permanent chrome for a value that only matters while cycling it, and `t` already reports `Theme: <name>` in the status row on demand. The `Tab: switch` hint named no destination; the tab bar itself does, and `tab switch` is now carried in the normal footer.
 3. A horizontal rule.
 4. A package content region of exactly `height - 7` rows.
 5. A horizontal rule.
 6. One status row.
 7. One footer/help row.
 
-The normal footer's exact logical string is `[/ or s] search  u uninstall  t theme  r refresh  q quit`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels.
+The normal footer's exact logical string is `[/ or s] search  tab switch  u uninstall  t theme  r refresh  q quit`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. **[REWRITE ADDITION]** `tab switch` sits second, next to the other list-navigation key; parity omitted `tab` from the footer entirely and taught it only in the header.
 
-Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `[/ or s] search  u uninstall  `: cells 29 and 30 are both ASCII spaces. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
+Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `[/ or s] search  tab switch  u`: cell 30 is the `u` of `u uninstall`. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
 Package rows render a selection marker, name, kind, and optional version. The row shape is ` <marker> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
 
-If the filtered list is empty, render `No matching packages`; if the unfiltered list is empty, render `No packages found`.
+#### List scrollbar
+
+**[REWRITE ADDITION]** When the filtered list does not fit in one page, the list pane's final column is a scrollbar and rows are laid out in the remaining width. When it does fit, the column is absent and rows use the full pane width. Neither case changes the pane's total width, so the divider and border never move.
+
+Only the thumb is drawn, as `█` in the border role; the track is blank. The column sits directly against the divider or the border, so a `│` track would render as `││` and read as a doubled border. A visible thumb is itself the signal that there is more list than fits, because the column only exists in that case. Thumb and track differ by glyph rather than by color, so the bar reads the same under a monochrome theme.
+
+The list is paginated, not continuously scrolled, so the thumb is sized and positioned by page: its height is `max(1, rows / total-pages)` and its top is `(rows - thumb-height) * page / (total-pages - 1)`. Deriving the offset from travel and page index rather than from a proportion of rows makes the thumb sit flush against the top on the first page and flush against the bottom on the last, with no rounding gap that would suggest unseen content.
+
+Total pages is derived from the rows currently visible and the page size, not read from the paginator's own counter, so a filter that has just shrunk the list cannot size the bar from stale bookkeeping.
+
+Neither Bubbles nor Lipgloss provides a scrollbar widget. Bubbles' `paginator` renders only a page indicator (`1/4` or dots) and its `viewport` exposes scroll position without drawing it, so this column is drawn here rather than delegated. The list's own Bubbles pagination view stays disabled; it would be a second, weaker indicator of the same state.
+
+If the filtered list is empty, render `No matching packages`; if the unfiltered list is empty, render `No packages found`. **[REWRITE ADDITION]** While a list command is active, render neither: the list pane's first row is blank, because the status row already owns the spinner and its `Loading ...`/`Refreshing ...`/`Reloading ...` text. Parity rendered `No packages found` next to `Loading formulae...` in the same frame, which read as the switch having emptied the list.
 
 Selection never wraps. Keep the selected row inside the content region by adjusting the scroll offset. After filtering, list reload, kind switch, or refresh, both selection and offset must be valid even for an empty list.
 
@@ -210,10 +242,39 @@ Selection never wraps. Keep the selected row inside the content region by adjust
 
 **[CURRENT/PARITY]** Below 72 columns, the package list receives the complete content width inside the border and no info pane or divider is rendered.
 
+**[REWRITE ADDITION]** With no selected package the info pane renders its own first row as `Loading info...` while a list command is active, and stays fully blank otherwise. A list load clears the selection, so the pane has no package to head and no details to fetch; parity left it blank for the entire load, which on a cold kind switch is the whole several-hundred-millisecond window, with only the status row showing that anything was happening. An empty list that is not loading stays blank, because the list pane's own `No packages found` already covers it. The string is the same `Loading info...` the info loader uses for a pending fetch, shared as one exported constant so the two cannot drift.
+
 At 72 columns or wider, place the divider at integer `width / 2`. The list occupies the cells inside the left border and before the divider. The right pane begins after the divider and renders:
 
 - `Info: <selected-name>` on its first content row.
 - The selected package's info beneath it in a soft-wrapped viewport, clipped to remaining content rows.
+
+#### Info pane content
+
+**[REWRITE ADDITION]** Parity printed `brew info` verbatim. That output is written for someone about to install a package — provenance, build options, download analytics — while this screen serves someone deciding whether to remove one they already have. The pane therefore renders a curated panel: the one-line description, a blank row, then aligned label/value rows, and for a formula a blank row and a removal verdict.
+
+Rows appear only when their value is available, in this order:
+
+| Row | Value |
+|---|---|
+| `Version` | Installed version, then `(up to date)` when it matches what Homebrew offers, or `(latest <version>)` when it does not. |
+| `Size` | Installed size, then file count when Homebrew reports one. |
+| `Installed` | `as a dependency`, and only then. |
+| `License` | Homebrew's license field. Formulae only; casks do not carry one. |
+| `Home` | Homepage URL. |
+| `Needed by` | `nothing installed`, or up to three dependent names followed by `and <n> more`. Formulae only. |
+
+Labels are padded to a fixed width equal to the longest label, not to the longest label present in a given panel, so the value column lands on the same cell for every package and does not shift as the selection moves.
+
+The verdict row is `Safe to remove.` when a formula has no installed dependents, or `Removing this breaks <n> installed formula(e).` when it does.
+
+Three deliberate restraints, because this pane feeds a destructive action:
+
+1. A version is never labelled `outdated`. An auto-updating cask legitimately sits behind Homebrew's version, so the pane names the newer version and draws no conclusion.
+2. `Needed by` and the verdict require a dependent lookup that actually succeeded. A cask has no such lookup, and a formula whose lookup failed gets neither row: absence of evidence must never render as an assurance of safety.
+3. A failed dependent lookup does not fail the load. The panel renders without those two rows, since details that did load are more useful than an error for a package whose details are fine.
+
+The fields are parsed from the same `brew info` text, not from `brew info --json=v2`, because the JSON carries no installed size and size is the field this screen exists for. Any row that cannot be parsed is omitted, and when neither a description nor a size can be found the raw text is rendered unchanged — a Homebrew output change degrades to the parity behaviour rather than to a blank pane.
 
 On a new info target, set viewport Y offset to zero. There are no info-scrolling keys; the viewport supplies width-aware wrapping and clipping, not an additional navigation feature. Info loading continues and caches results even while the terminal is too narrow to show the pane.
 
@@ -228,6 +289,8 @@ Render the first applicable state:
 5. Normal search prefix alone.
 
 `<query-or-—>` uses an em dash for an empty query.
+
+**[REWRITE ADDITION]** The normal search prefix carries the section 3 list count as its own ` | `-joined segment, between the query and any ordinary status, and is omitted when the list is empty. Rows 4 and 5 above therefore render as `Search [/ or s]: <query-or-—> | <count> | <status>` and `Search [/ or s]: <query-or-—> | <count>`. Rows 1 through 3 are unchanged and carry no count.
 
 ### Themes
 
@@ -314,10 +377,10 @@ On shutdown, the supervised quitting contract in section 13 cancels any active i
 **[CURRENT/PARITY]** `r` or `R` performs one atomic logical refresh:
 
 1. Increment the info generation.
-2. Clear the entire info cache, current info key/text, and pending info request.
+2. Clear the entire info cache, current info key/text, and pending info request. **[REWRITE ADDITION]** Clear the retained per-kind list cache in the same step; see the list cache contract below.
 3. Start reloading the active cask/formula list without a shell.
 4. Keep the previous numerical selection while loading, then clamp it and its scroll offset to the refreshed, filtered list.
-5. On list success, show `<count> casks installed` or `<count> formulas installed` and schedule fresh info for the resulting selected package.
+5. On list success, clear the status slot and schedule fresh info for the resulting selected package. **[REWRITE ADDITION]** The count is no longer written here; the section 6 status prefix derives it from the refreshed list, so the rendered row is unchanged for an unfiltered load and correct for a filtered one.
 6. On list failure, replace the list with empty data, show the mapped error, and leave no info target.
 
 An old-generation info process may finish, but its result follows the stale-result rule and cannot repopulate the cleared cache.
@@ -326,14 +389,32 @@ An old-generation info process may finish, but its result follows the stale-resu
 
 Homebrew I/O runs in `tea.Cmd`, never inside `Update`. Startup initializes the cask model and starts its list command from `Init`. A kind switch resets selection/offset and starts the target kind's list command. There is at most one list command at a time. Each list operation owns a retained context/cancel function until its typed result message has been handled; the command adapter has then returned from `Run`/`Wait` and reaped its directly owned child.
 
+### List cache
+
+**[REWRITE ADDITION]** Every successful list result is retained per kind. A kind switch to a retained kind is served from that retention: it starts no command, enters no loading state, and renders the target list in the same frame as the key press. Only a kind not retained this session starts a `loadSwitch` command. Parity re-ran `brew list` on every switch, so each one cost a fresh empty pane.
+
+Map presence is the retention test, not list length. A kind with nothing installed is retained as an empty list and is a hit, rather than re-shelling on every switch.
+
+Retention is dropped wholesale — both kinds — at exactly the two sites that already drop the info cache, and only there:
+
+1. `r` or `R` refresh, per the section 8 refresh contract. Refresh means the inventory may have changed outside the app, so no kind stays trusted.
+2. A committed uninstall, before its `loadAfterUninstall` reload starts. Uninstalling one kind can change the other, so both are dropped rather than reasoning about which.
+
+The info cache and the list cache are invalidated together at both sites and must stay that way: anything that can change what `brew info` prints can change what `brew list` prints. After either site the reload repopulates only the active kind, so the next switch is a miss and re-lists.
+
+Retention is per session and is not revalidated. An install or uninstall performed in another terminal is not observed until `r`. Parity's per-switch re-list masked that, at the cost of the empty pane on every switch; `r` is the explicit remedy.
+
+A failed list result caches nothing, so a broken Homebrew never poisons retention. The other kind's earlier retention does survive that failure and can still be switched to.
+
 The key, priority-status, and footer contracts while a list command is active are exact:
 
 | Load state | Priority status with active spinner | Footer | Ordinary keys |
 |---|---|---|---|
 | Startup cask load | `Loading casks...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Kind-switch load | `Loading casks...` or `Loading formulas...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| User refresh | `Refreshing casks...` or `Refreshing formulas...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Post-uninstall reload | `Reloading casks...` or `Reloading formulas...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
+| Kind-switch load | `Loading casks...` or `Loading formulae...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
+| Cached kind switch | none; no command runs | `[/ or s] search  tab switch  u uninstall  t theme  r refresh  q quit` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
+| User refresh | `Refreshing casks...` or `Refreshing formulae...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
+| Post-uninstall reload | `Reloading casks...` or `Reloading formulae...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
 
 `tea.WindowSizeMsg` and the global interrupt contract are handled in every row. Startup, switch, and refresh return to normal mode on their list result. Post-uninstall reload remains uninstall-progress mode with the list frozen and controls disabled until its result establishes final success or failure.
 
@@ -545,6 +626,7 @@ Interface consumed by UI/info:
 type Homebrew interface {
     List(context.Context, Kind) ([]Package, error)
     Info(context.Context, Package) (string, error)
+    Uses(context.Context, Package) ([]string, error) // [REWRITE ADDITION]
 }
 
 type ResolvedCommand struct {

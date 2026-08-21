@@ -10,7 +10,10 @@ import (
 	"lazybrew/internal/brew"
 )
 
-const loadingText = "Loading info..."
+// LoadingText is the info-pane placeholder shown while a package's details are
+// still being fetched. Exported so the view can render the same string for the
+// window where a list load has left nothing selected to fetch details for.
+const LoadingText = "Loading info..."
 
 // LoadFunc loads package information without blocking the Bubble Tea update loop.
 type LoadFunc func(context.Context, brew.Package) (string, error)
@@ -183,7 +186,7 @@ func (l *Loader) selectLocked(pkg *brew.Package) tea.Cmd {
 	}
 
 	wanted := identity{generation: l.generation, key: selected}
-	l.text = loadingText
+	l.text = LoadingText
 	if l.active != nil {
 		if l.active.identity == wanted {
 			l.pending = nil

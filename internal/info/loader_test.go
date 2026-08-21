@@ -108,8 +108,8 @@ func TestLoaderKeepsOnlyLatestPendingAndCachesCompletedTargets(t *testing.T) {
 
 	callA.reply <- loadReply{text: "A info\n"}
 	cmdC := loader.Complete(nextResult(t, resultsA))
-	if got := loader.Text(); got != loadingText {
-		t.Fatalf("text after non-current A completion = %q, want %q", got, loadingText)
+	if got := loader.Text(); got != LoadingText {
+		t.Fatalf("text after non-current A completion = %q, want %q", got, LoadingText)
 	}
 
 	resultsC := startCommand(t, cmdC)
@@ -168,13 +168,13 @@ func TestLoaderRefreshDiscardsOldGeneration(t *testing.T) {
 
 	oldCall.reply <- loadReply{text: "stale info"}
 	freshCmd := loader.Complete(nextResult(t, oldResults))
-	if got := loader.Text(); got != loadingText {
+	if got := loader.Text(); got != LoadingText {
 		t.Fatalf("old generation rendered %q", got)
 	}
 	if cmd := loader.Select(&a); cmd != nil {
 		t.Fatal("reselect started a duplicate fresh-generation command")
 	}
-	if got := loader.Text(); got != loadingText {
+	if got := loader.Text(); got != LoadingText {
 		t.Fatalf("old generation entered cache: text = %q", got)
 	}
 

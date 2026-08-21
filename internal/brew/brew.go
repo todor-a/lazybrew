@@ -26,6 +26,7 @@ type Package struct {
 type Homebrew interface {
 	List(context.Context, Kind) ([]Package, error)
 	Info(context.Context, Package) (string, error)
+	Uses(context.Context, Package) ([]string, error)
 }
 
 type client struct{}
@@ -33,6 +34,8 @@ type client struct{}
 var (
 	errInvalidKind = errors.New("invalid Homebrew package kind")
 	errUnsafeInfo  = errors.New("Unsafe package name; info refused")
+	errUnsafeUses  = errors.New("Unsafe package name; dependents refused")
+	errUsesKind    = errors.New("dependents are only defined for formulae")
 )
 
 // New returns the real Homebrew command adapter.
@@ -67,6 +70,37 @@ func (client) Info(ctx context.Context, pkg Package) (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(string(stdout), "\r\n"), nil
+}
+
+// Uses reports the installed formulae that depend on pkg, so the info pane can
+// say whether removing it would break something else.
+//
+// Formulae only. `brew uses` resolves its argument as a formula, so a cask token
+// makes it warn about an unknown formula and report nothing; a cask must not be
+// allowed to read as "nothing depends on this".
+func (client) Uses(ctx context.Context, pkg Package) ([]string, error) {
+	if pkg.Kind != Formula {
+		return nil, errUsesKind
+	}
+	if !safePackageName(pkg.Name) {
+		return nil, errUnsafeUses
+	}
+
+	stdout, _, err := run(ctx, []string{"uses", "--installed", pkg.Name})
+	if err != nil {
+		return nil, err
+	}
+	return parseNames(string(stdout)), nil
+}
+
+func parseNames(output string) []string {
+	var names []string
+	for _, rawLine := range strings.Split(output, "\n") {
+		if line := strings.TrimSpace(rawLine); line != "" {
+			names = append(names, line)
+		}
+	}
+	return names
 }
 
 func listArgs(kind Kind) ([]string, error) {

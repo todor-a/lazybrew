@@ -10,6 +10,7 @@ func (k footerKeys) FullHelp() [][]key.Binding { return [][]key.Binding{k} }
 var (
 	normalHelp = footerKeys{
 		key.NewBinding(key.WithKeys("/", "s", "S"), key.WithHelp("[/ or s]", "search")),
+		key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "switch")),
 		key.NewBinding(key.WithKeys("u", "U"), key.WithHelp("u", "uninstall")),
 		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("t", "theme")),
 		key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("r", "refresh")),

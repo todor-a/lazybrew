@@ -38,7 +38,7 @@ func run() int {
 	}
 
 	homebrew := brew.New()
-	loader := info.New(homebrew.Info)
+	loader := info.New(info.Details(homebrew.Info, homebrew.Uses))
 	uninstaller := uninstall.New()
 	root, supervisor := ui.New(homebrew, loader, uninstaller)
 	program := tea.NewProgram(root, tea.WithoutSignalHandler())

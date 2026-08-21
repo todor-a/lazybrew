@@ -9,6 +9,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"lazybrew/internal/brew"
+	"lazybrew/internal/info"
 )
 
 var ansiSequence = regexp.MustCompile(`\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))`)
@@ -34,7 +35,7 @@ func TestMinimumSizeAndExactThirtyCellFooter(t *testing.T) {
 		t.Fatalf("footer row width=%d, want 32", len(footerRunes))
 	}
 	got := string(footerRunes[1:31])
-	want := "[/ or s] search  u uninstall  "
+	want := "[/ or s] search  tab switch  u"
 	if got != want {
 		t.Fatalf("footer interior=%q, want %q", got, want)
 	}
@@ -67,7 +68,7 @@ func TestConfirmationAndPasswordAreCenteredLayersOverBase(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.Update(textKey("u"))
 	confirmation := strings.Join(strippedLines(m), "\n")
-	for _, exact := range []string{"lazybrew [Lazygit]", "Confirm uninstall", "Uninstall Alpha?", "y: confirm  other: cancel"} {
+	for _, exact := range []string{"[ Apps ]    Formulae", "Confirm uninstall", "Uninstall Alpha?", "y: confirm  other: cancel"} {
 		if !strings.Contains(confirmation, exact) {
 			t.Fatalf("confirmation view missing %q\n%s", exact, confirmation)
 		}
@@ -208,4 +209,193 @@ func TestColorProfileClassificationAndNoColor(t *testing.T) {
 			t.Fatal("NO_COLOR did not override true color profile")
 		}
 	})
+}
+
+func TestLoadingListPaneShowsNoEmptyStateAndHeaderMarksActiveList(t *testing.T) {
+	m, _ := newTestModel(t)
+	if got := strippedLines(m)[1]; !strings.Contains(got, "[ Apps ]    Formulae") {
+		t.Fatalf("cask header=%q, want the cask tab bracketed", got)
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !m.loading {
+		t.Fatal("tab did not start a list load")
+	}
+	lines := strippedLines(m)
+	if got := lines[1]; !strings.Contains(got, "  Apps    [ Formulae ]") {
+		t.Fatalf("formula header=%q, want the formula tab bracketed", got)
+	}
+	if strings.Contains(lines[3], "No packages found") {
+		t.Fatalf("loading list pane contradicts the status row: %q", lines[3])
+	}
+	if got := lines[m.height-3]; !strings.Contains(got, "Loading formulae...") {
+		t.Fatalf("loading status=%q, want formulae spelling", got)
+	}
+}
+
+func TestTabSwitchesListFromSearchMode(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.KeyPressMsg{Code: '/'})
+	if m.mode != modeSearch {
+		t.Fatal("/ did not enter search mode")
+	}
+	m.query = "a"
+	m.applyFilter(0)
+
+	before := m.kind
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.kind == before {
+		t.Fatal("tab in search mode did not switch kind")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("mode=%v after tab, want normal", m.mode)
+	}
+	if m.query != "a" {
+		t.Fatalf("query=%q after tab, want it preserved", m.query)
+	}
+}
+
+func TestInstalledCountTracksTheActiveFilter(t *testing.T) {
+	m, _ := newTestModel(t)
+	statusRow := func() string { return strippedLines(m)[m.height-3] }
+
+	if got := statusRow(); !strings.Contains(got, "3 casks installed") {
+		t.Fatalf("unfiltered status=%q, want total count", got)
+	}
+
+	m.query = "al"
+	m.applyFilter(0)
+	got := statusRow()
+	if !strings.Contains(got, "1 of 3 casks match") {
+		t.Fatalf("filtered status=%q, want filtered count", got)
+	}
+	if strings.Contains(got, "3 casks installed") {
+		t.Fatalf("filtered status still claims the unfiltered total: %q", got)
+	}
+
+	m.query = ""
+	m.applyFilter(0)
+	if got := statusRow(); !strings.Contains(got, "3 casks installed") {
+		t.Fatalf("status after clearing query=%q, want total count", got)
+	}
+
+	m.setPackages(nil, 0)
+	if got := statusRow(); strings.Contains(got, "installed") || strings.Contains(got, "match") {
+		t.Fatalf("empty list still reports a count: %q", got)
+	}
+}
+
+func TestPriorityStatusOwnsTheRowWithoutACount(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.status, m.priority = "Uninstalled Alpha", true
+	got := strings.TrimSpace(strippedLines(m)[m.height-3])
+	if want := "│Uninstalled Alpha"; !strings.HasPrefix(got, want) {
+		t.Fatalf("priority status row=%q, want it to own the row", got)
+	}
+	if strings.Contains(got, "casks installed") || strings.Contains(got, "casks match") {
+		t.Fatalf("priority status row carries a count: %q", got)
+	}
+}
+
+func TestInfoPaneShowsLoadingWhileALoadClearsTheSelection(t *testing.T) {
+	m, _ := newTestModel(t)
+	if got := strippedLines(m)[3]; !strings.Contains(got, "Info: Alpha") {
+		t.Fatalf("settled info pane=%q, want a package heading", got)
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !m.loading || m.selectedPackage() != nil {
+		t.Fatalf("expected a load with no selection: loading=%v selected=%v", m.loading, m.selectedPackage())
+	}
+	if got := strippedLines(m)[3]; !strings.Contains(got, info.LoadingText) {
+		t.Fatalf("info pane during load=%q, want %q", got, info.LoadingText)
+	}
+
+	m.loading = false
+	m.setPackages(nil, 0)
+	if got := strippedLines(m)[3]; strings.Contains(got, info.LoadingText) {
+		t.Fatalf("settled empty list still claims to be loading: %q", got)
+	}
+}
+
+// scrollbarRows returns the last cell of each content row of the list pane.
+func scrollbarRows(m *model) []string {
+	lines := strippedLines(m)
+	column := make([]string, 0, m.contentRows)
+	for row := 0; row < m.contentRows; row++ {
+		pane := []rune(lines[3+row])
+		// row starts after the left border and ends before the divider.
+		column = append(column, string(pane[m.width/2-1]))
+	}
+	return column
+}
+
+func TestScrollbarAppearsOnlyWhenTheListOverflows(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	if m.contentRows < 3 {
+		t.Fatalf("contentRows=%d, too small to exercise the bar", m.contentRows)
+	}
+
+	// Three packages in five rows: everything fits, so no column is drawn and the
+	// row keeps the full pane width.
+	for _, cell := range scrollbarRows(m) {
+		if cell == "█" {
+			t.Fatalf("drew a thumb for a list that fits:\n%s", strings.Join(strippedLines(m), "\n"))
+		}
+	}
+
+	// Two rows of viewport against three packages forces two pages.
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+	column := scrollbarRows(m)
+	thumbs := 0
+	for _, cell := range column {
+		if cell == "█" {
+			thumbs++
+		}
+	}
+	if thumbs == 0 {
+		t.Fatalf("no thumb for an overflowing list: %q\n%s", column, strings.Join(strippedLines(m), "\n"))
+	}
+	if thumbs == len(column) {
+		t.Fatalf("thumb fills the whole track, so it shows no position: %q", column)
+	}
+}
+
+func TestScrollbarThumbSitsFlushAtBothEnds(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+
+	first := scrollbarRows(m)
+	if first[0] != "█" {
+		t.Fatalf("first page thumb is not flush with the top: %q", first)
+	}
+
+	// Walk to the last row so the paginator is on its final page.
+	for i := 0; i < 10; i++ {
+		m.Update(tea.KeyPressMsg{Code: 'j'})
+	}
+	last := scrollbarRows(m)
+	if last[len(last)-1] != "█" {
+		t.Fatalf("last page thumb is not flush with the bottom: %q", last)
+	}
+	if last[0] == "█" {
+		t.Fatalf("thumb never moved off the top: %q", last)
+	}
+}
+
+func TestScrollbarNeverChangesTheRenderedWidth(t *testing.T) {
+	m, _ := newTestModel(t)
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 32, Height: 9}, {Width: 40, Height: 9},
+		{Width: 71, Height: 10}, {Width: 72, Height: 10}, {Width: 80, Height: 9},
+	} {
+		m.Update(size)
+		for row, line := range strippedLines(m) {
+			if got := lipgloss.Width(line); got != size.Width {
+				t.Fatalf("at %dx%d row %d width=%d, want %d: %q",
+					size.Width, size.Height, row, got, size.Width, line)
+			}
+		}
+	}
 }

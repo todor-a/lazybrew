@@ -325,6 +325,7 @@ type model struct {
 	loadSelection int
 	listCancel    context.CancelFunc
 	infoPending   bool
+	listCache     map[brew.Kind][]brew.Package
 
 	status           string
 	priority         bool
@@ -377,6 +378,7 @@ func New(homebrew brew.Homebrew, loader *info.Loader, uninstaller uninstall.Unin
 		loading:       true,
 		loadPurpose:   loadStartup,
 		spinnerActive: true,
+		listCache:     make(map[brew.Kind][]brew.Package),
 	}
 	m.viewport = viewport.New(viewport.WithWidth(0), viewport.WithHeight(0))
 	m.viewport.SoftWrap = true
@@ -500,11 +502,7 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	case "/", "s", "S":
 		m.mode = modeSearch
 	case "tab":
-		m.kind = otherKind(m.kind)
-		m.status, m.priority = "", false
-		m.setPackages(nil, 0)
-		m.info.Select(nil)
-		return tea.Batch(m.startList(loadSwitch, 0), m.spinner.Tick)
+		return m.switchKind()
 	case "u", "U":
 		selected := m.selectedPackage()
 		if selected == nil {
@@ -523,7 +521,7 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
 	case "r", "R":
 		selection := m.list.Index()
-		m.info.Refresh(nil)
+		m.invalidateCaches()
 		return tea.Batch(m.startList(loadRefresh, selection), m.spinner.Tick)
 	case "q", "Q":
 		return m.beginQuit(0)
@@ -531,11 +529,43 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+// switchKind toggles cask <-> formula. The query stays active, so the target
+// list arrives already filtered.
+//
+// A kind already listed this session is served from listCache and renders in
+// the same frame as the key press, starting no command at all. Map presence is
+// the hit test, not slice length, so a kind with nothing installed is a hit too
+// rather than re-shelling on every switch.
+func (m *model) switchKind() tea.Cmd {
+	m.kind = otherKind(m.kind)
+	m.status, m.priority = "", false
+	m.info.Select(nil)
+	if cached, ok := m.listCache[m.kind]; ok {
+		m.setPackages(cached, 0)
+		return m.selectInfo()
+	}
+	m.setPackages(nil, 0)
+	return tea.Batch(m.startList(loadSwitch, 0), m.spinner.Tick)
+}
+
+// invalidateCaches drops the info cache and the list cache together. Every site
+// that invalidates one must invalidate the other: anything that can change what
+// `brew info` prints can also change what `brew list` prints.
+func (m *model) invalidateCaches() {
+	m.info.Refresh(nil)
+	clear(m.listCache)
+}
+
 func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
 	switch key.String() {
 	case "enter":
 		m.mode = modeNormal
 		return nil
+	case "tab":
+		// The list result returns to normal mode anyway; leave search here so the
+		// mode change is visible before the load rather than after it.
+		m.mode = modeNormal
+		return m.switchKind()
 	case "esc":
 		m.query = ""
 		m.applyFilter(0)
@@ -802,7 +832,7 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 		m.finishUninstall(flattenStatus(result.Err.Error()))
 	default:
 		selection := m.list.Index()
-		m.info.Refresh(nil)
+		m.invalidateCaches()
 		m.mode = modeUninstall
 		m.spinnerActive = true
 		return tea.Batch(m.startList(loadAfterUninstall, selection), m.spinner.Tick)
@@ -862,8 +892,8 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 		}
 		return nil
 	}
+	m.listCache[msg.kind] = msg.packages
 	m.setPackages(msg.packages, m.loadSelection)
-	countStatus := installedStatus(len(msg.packages), msg.kind)
 	if msg.purpose == loadAfterUninstall {
 		name := ""
 		if m.operation != nil {
@@ -875,7 +905,7 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 		m.status, m.priority = "Uninstalled "+name, true
 	} else {
 		m.mode = modeNormal
-		m.status, m.priority = countStatus, false
+		m.status, m.priority = "", false
 	}
 	return m.selectInfo()
 }
@@ -1044,11 +1074,24 @@ func otherKind(kind brew.Kind) brew.Kind {
 	return brew.Cask
 }
 
-func installedStatus(count int, kind brew.Kind) string {
-	if kind == brew.Cask {
-		return strconv.Itoa(count) + " casks installed"
+// installedStatus is computed at render time from the live list rather than
+// frozen into m.status at load time, so it cannot go stale behind a query that
+// was typed, cleared, or carried across a kind switch. It reports nothing for
+// an empty list; the list pane's own empty state already says that, and a
+// failed load would otherwise read as "0 installed".
+func (m *model) installedStatus() string {
+	total := len(m.list.Items())
+	if total == 0 {
+		return ""
 	}
-	return strconv.Itoa(count) + " formulas installed"
+	noun := "casks"
+	if m.kind == brew.Formula {
+		noun = "formulae"
+	}
+	if shown := len(m.list.VisibleItems()); shown != total {
+		return strconv.Itoa(shown) + " of " + strconv.Itoa(total) + " " + noun + " match"
+	}
+	return strconv.Itoa(total) + " " + noun + " installed"
 }
 
 func flattenStatus(value string) string {

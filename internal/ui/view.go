@@ -8,6 +8,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"lazybrew/internal/brew"
+	"lazybrew/internal/info"
 )
 
 func (m *model) View() tea.View {
@@ -53,15 +54,21 @@ func (m *model) baseView() string {
 	return border.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
-func (m *model) headerLine() string {
-	return "lazybrew [" + m.currentTheme().name + "]  " + activeListLabel(m.kind) + "  Tab: switch"
-}
+func (m *model) headerLine() string { return activeListLabel(m.kind) }
 
+// activeListLabel names both lists and brackets the active one. Brackets rather
+// than a ">" marker: ">" is what the list uses for its selected row, and
+// "Apps > Formulae" reads as a breadcrumb path instead of a choice between two
+// tabs. Brackets need no color, so the cue survives monochrome themes without
+// nesting styles inside the single-style header row.
+//
+// Each name keeps a fixed 8- and 12-cell slot with the bracket columns reserved
+// on both sides, so switching swaps the brackets without shifting either name.
 func activeListLabel(kind brew.Kind) string {
 	if kind == brew.Cask {
-		return "Apps [casks]"
+		return "[ Apps ]    Formulae  "
 	}
-	return "Formulae [formula]"
+	return "  Apps    [ Formulae ]"
 }
 
 func (m *model) contentLines() []string {
@@ -96,6 +103,11 @@ func (m *model) listLines(width, height int) []string {
 		if m.query != "" {
 			empty = "No matching packages"
 		}
+		if m.loading {
+			// ponytail: the status row already owns the spinner and "Loading ...";
+			// an empty-state here would contradict it mid-load.
+			empty = ""
+		}
 		if height > 0 {
 			lines[0] = fit(empty, width)
 		}
@@ -110,21 +122,71 @@ func (m *model) listLines(width, height int) []string {
 		perPage = max(1, height)
 	}
 	start := m.list.Paginator.Page * perPage
+
+	// Total pages is derived from the rows actually on screen rather than read
+	// from the paginator, so a filter that has just shrunk the list cannot leave
+	// the bar sized from stale bookkeeping.
+	totalPages := (len(visible) + perPage - 1) / perPage
+	bar := m.scrollbarColumn(height, totalPages, m.list.Paginator.Page)
+	rowWidth := width
+	if bar != nil {
+		rowWidth = width - 1
+	}
+
 	for row := 0; row < height; row++ {
 		index := start + row
-		if index >= len(visible) {
-			lines[row] = strings.Repeat(" ", width)
-			continue
+		content := strings.Repeat(" ", max(rowWidth, 0))
+		if index < len(visible) {
+			if item, ok := visible[index].(packageItem); ok {
+				content = m.packageLine(item.packageValue, index == m.list.Index(), rowWidth)
+			}
 		}
-		item, ok := visible[index].(packageItem)
-		if !ok {
-			lines[row] = strings.Repeat(" ", width)
-			continue
+		if bar != nil {
+			content += bar[row]
 		}
-		selected := index == m.list.Index()
-		lines[row] = m.packageLine(item.packageValue, selected, width)
+		lines[row] = content
 	}
 	return lines
+}
+
+// scrollbarColumn renders the one-cell column that shows which slice of a longer
+// list is on screen. It returns nil when everything fits, so the column costs no
+// width in that case and a short list keeps the full pane for its rows.
+//
+// The list is paginated rather than continuously scrolled, so the thumb is sized
+// and positioned by page. Deriving the offset from travel and page index — not
+// from a proportion of rows — makes the thumb sit flush against the top on the
+// first page and flush against the bottom on the last, with no rounding gap that
+// would suggest there is more to see.
+//
+// Only the thumb is drawn; the track is blank. The column sits directly against
+// the divider or the border, so a "│" track would render as "││" and read as a
+// doubled border rather than as a scrollbar. A visible thumb is itself the signal
+// that there is more list than fits, since the column is absent whenever
+// everything does fit.
+//
+// The thumb carries the border role, so it needs no color of its own and reads
+// the same under a monochrome theme as under a colored one.
+func (m *model) scrollbarColumn(height, totalPages, page int) []string {
+	if height <= 0 || totalPages <= 1 {
+		return nil
+	}
+	thumbHeight := max(1, height/totalPages)
+	thumbTop := 0
+	if travel := height - thumbHeight; travel > 0 {
+		thumbTop = travel * page / (totalPages - 1)
+	}
+
+	style := roleStyle(m.currentTheme().border)
+	column := make([]string, height)
+	for row := range column {
+		glyph := " "
+		if row >= thumbTop && row < thumbTop+thumbHeight {
+			glyph = "█"
+		}
+		column[row] = style.Render(glyph)
+	}
+	return column
 }
 
 func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
@@ -155,6 +217,14 @@ func (m *model) infoLines(width, height int) []string {
 	if selected == nil {
 		for i := range lines {
 			lines[i] = strings.Repeat(" ", width)
+		}
+		// A list load clears the selection, so there is no package to head this
+		// pane with and no details to fetch yet. Without this the pane is blank
+		// for the whole load and only the status row shows anything happening.
+		// An empty list that is not loading stays blank: the list pane's own
+		// "No packages found" already covers it.
+		if m.loading && height > 0 {
+			lines[0] = fit(info.LoadingText, width)
 		}
 		return lines
 	}
@@ -200,6 +270,9 @@ func (m *model) statusLine() string {
 	if m.query == "" {
 		prefix = "Search [/ or s]: —"
 	}
+	if count := m.installedStatus(); count != "" {
+		prefix += " | " + count
+	}
 	if status != "" {
 		return prefix + " | " + status
 	}
@@ -210,7 +283,7 @@ func kindPlural(kind brew.Kind) string {
 	if kind == brew.Cask {
 		return "casks"
 	}
-	return "formulas"
+	return "formulae"
 }
 
 func (m *model) footerLine(width int) string {
@@ -308,11 +381,11 @@ func (m *model) confirmationFits(pkg brew.Package) bool {
 		"Uninstalling " + pkg.Name + "...",
 		"Cancelling " + pkg.Name + "...",
 		"Loading casks...",
-		"Loading formulas...",
+		"Loading formulae...",
 		"Refreshing casks...",
-		"Refreshing formulas...",
+		"Refreshing formulae...",
 		"Reloading casks...",
-		"Reloading formulas...",
+		"Reloading formulae...",
 	}
 	for _, line := range lines {
 		if lipgloss.Width(line) > available {
