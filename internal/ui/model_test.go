@@ -17,14 +17,9 @@ import (
 )
 
 type fakeHomebrew struct {
-	packages    map[brew.Kind][]brew.Package
-	outdated    map[brew.Kind][]string
-	outdatedErr error
-	err         error
-	listStarted chan struct{}
-	listCalls   map[brew.Kind]int
-	dependents  map[string][]string
 	packages     map[brew.Kind][]brew.Package
+	outdated     map[brew.Kind][]string
+	outdatedErr  error
 	err          error
 	listStarted  chan struct{}
 	listCalls    map[brew.Kind]int
@@ -37,6 +32,11 @@ type fakeHomebrew struct {
 
 func (f *fakeHomebrew) Sizes(ctx context.Context) (brew.Sizes, error) {
 	f.sizesCalls++
+	// A real du fails on an already-cancelled context; so must the fake, or a
+	// cancellation bug is invisible to every test that uses it.
+	if err := ctx.Err(); err != nil {
+		return brew.Sizes{}, err
+	}
 	if f.sizesStarted != nil {
 		close(f.sizesStarted)
 		<-ctx.Done()
@@ -152,10 +152,16 @@ func newTestModel(t *testing.T) (*model, *fakeUninstaller) {
 				{Name: "Beta", Version: "2.0", Kind: brew.Cask},
 				{Name: "Gamma", Version: "3.0", Kind: brew.Cask},
 			},
+			brew.Formula: {
+				{Name: "Alpha", Version: "1.0", Kind: brew.Formula},
+				{Name: "Beta", Version: "2.0", Kind: brew.Formula},
+				{Name: "Gamma", Version: "3.0", Kind: brew.Formula},
+			},
 		},
+		// Sizes are formula-only; see brew.Sizes.
 		sizes: brew.Sizes{
-			Cask:  map[string]int64{"Alpha": 1024, "Beta": 5 * 1024 * 1024, "Gamma": 512},
-			Total: 11902796,
+			Formula: map[string]int64{"Alpha": 1024, "Beta": 5 * 1024 * 1024, "Gamma": 512},
+			Total:   9687960,
 		},
 	}
 	job := newFakeJob()
@@ -1086,8 +1092,7 @@ func diskFleet() *fakeHomebrew {
 				"llvm@22": 1550732,
 				"vault":   519248,
 			},
-			Cask:  map[string]int64{"Alpha": 1024, "Beta": 48568},
-			Total: 11902796,
+			Total: 9687960,
 		},
 	}
 }
@@ -1479,5 +1484,59 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 				t.Fatalf("quitting applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
 			}
 		})
+	}
+}
+
+// A superseded size pass must be cancelled, not abandoned. Otherwise a second
+// refresh inside the measurement window leaves the first du running with its
+// context leaked and its completion handle unreachable from the supervisor.
+func TestASupersededSizePassIsCancelled(t *testing.T) {
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
+		},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+
+	first := m.startSizes()
+	if m.sizesCancel == nil {
+		t.Fatal("the first pass registered no cancel function")
+	}
+
+	second := m.startSizes()
+	if m.sizesCancel == nil {
+		t.Fatal("the second pass registered no cancel function")
+	}
+	// The first pass's context must already be done; the second must not be.
+	firstCtxDone := func() bool {
+		msg, _ := first().(sizesResultMsg)
+		return msg.err != nil
+	}()
+	if !firstCtxDone {
+		t.Fatal("the superseded pass was not cancelled")
+	}
+	if msg, ok := second().(sizesResultMsg); !ok || msg.err != nil {
+		t.Fatalf("the current pass was cancelled too: %#v", msg)
+	}
+}
+
+// A dependency row displays "dep" and no longer displays "formula". The search
+// field must agree with the word on the row.
+func TestSearchMatchesTheRenderedOriginToken(t *testing.T) {
+	item := packageItem{packageValue: brew.Package{
+		Name: "llvm@22", Version: "22.1", Kind: brew.Formula, Dependency: true,
+	}}
+	value := strings.ToLower(item.FilterValue())
+	for _, want := range []string{"llvm@22", "dep", "formula"} {
+		if !strings.Contains(value, want) {
+			t.Fatalf("FilterValue()=%q, want it to contain %q", item.FilterValue(), want)
+		}
+	}
+
+	onRequest := packageItem{packageValue: brew.Package{Name: "vault", Kind: brew.Formula}}
+	if strings.Contains(strings.ToLower(onRequest.FilterValue()), "dep") {
+		t.Fatalf("an on-request formula matched %q: %q", "dep", onRequest.FilterValue())
 	}
 }

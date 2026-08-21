@@ -414,6 +414,9 @@ func TestOutdatedRowCarriesAFixedFreshnessCell(t *testing.T) {
 func TestOutdatedGlyphIsOneCell(t *testing.T) {
 	if got := lipgloss.Width("↑"); got != 1 {
 		t.Fatalf("lipgloss.Width(\"↑\")=%d, want 1", got)
+	}
+}
+
 func TestFooterListsEveryNormalKey(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
@@ -428,8 +431,13 @@ func TestFooterListsEveryNormalKey(t *testing.T) {
 // The size column is reserved before the measurement lands, so the name and
 // origin columns sit at the same cells either way and nothing reflows when sizes
 // arrive seconds after first paint.
+// The column is reserved on the formula list before the measurement arrives, so
+// a late size cannot reflow rows the user is already reading. The cask list
+// reserves nothing, because it is never measured.
 func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
 	m, _ := newTestModel(t)
+	switchTo(t, m)
+
 	for _, width := range []int{32, 72, 120} {
 		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
 		measured := strippedLines(m)[3]
@@ -442,7 +450,7 @@ func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
 		if lipgloss.Width(measured) != lipgloss.Width(blank) {
 			t.Fatalf("at width %d the row changed width when sizes landed: %q vs %q", width, blank, measured)
 		}
-		if index := strings.Index(blank, "cask"); index < 0 || index != strings.Index(measured, "cask") {
+		if index := cellIndex(blank, "formula"); index < 0 || index != cellIndex(measured, "formula") {
 			t.Fatalf("at width %d the origin column moved when sizes landed: %q vs %q", width, blank, measured)
 		}
 		if !strings.Contains(measured, "1MB") {
@@ -451,6 +459,13 @@ func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
 		if strings.ContainsAny(strings.TrimRight(blank, " │"), "KMG") {
 			t.Fatalf("at width %d the unmeasured row invented a size: %q", width, blank)
 		}
+	}
+
+	// Back on the cask list: no size, measured or not.
+	switchTo(t, m)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 16})
+	if row := strippedLines(m)[3]; strings.ContainsAny(strings.TrimRight(row, " │"), "KMG") {
+		t.Fatalf("the cask row carries a size: %q", row)
 	}
 }
 
@@ -463,34 +478,39 @@ func TestRowShapeAndNameColumnBounds(t *testing.T) {
 		want  string
 	}{
 		{
+			// No size column: the Caskroom is not measured, so the cask list
+			// reserves nothing for it and the name column keeps that width.
 			name:  "cask row",
 			pkg:   brew.Package{Name: "Alpha", Kind: brew.Cask},
 			width: 40,
-			want:  "   Alpha                     cask       ",
+			want:  "    Alpha                          cask ",
 		},
 		{
 			name:  "on-request formula",
 			pkg:   brew.Package{Name: "vault", Kind: brew.Formula},
 			width: 40,
-			want:  "   vault                  formula       ",
+			want:  "    vault                 formula       ",
 		},
 		{
 			name:  "dependency formula carries dep in the origin column",
 			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
 			width: 40,
-			want:  "   llvm@22                dep           ",
+			want:  "    llvm@22               dep           ",
 		},
 		{
 			// 32-column narrow layout with a scrollbar: the tightest supported row.
 			name:  "narrowest supported row keeps the pinned name minimum",
 			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
 			width: 29,
-			want:  "   llvm@22     dep           ",
+			want:  "    llvm@22    dep           ",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m.sizes = nil
+			// A row is only ever drawn on its own kind's list, and the reserved size
+			// column depends on which list that is.
+			m.kind = tt.pkg.Kind
 			got := ansiSequence.ReplaceAllString(m.packageLine(tt.pkg, false, tt.width), "")
 			if got != tt.want {
 				t.Fatalf("row=%q, want %q", got, tt.want)
@@ -502,47 +522,52 @@ func TestRowShapeAndNameColumnBounds(t *testing.T) {
 	}
 }
 
-func TestHeaderCarriesTheFleetTotalWithoutDisturbingTheTabBar(t *testing.T) {
+// The total is the Cellar's, so it renders on the formula list and nowhere else.
+func TestHeaderCarriesTheFleetTotalOnTheFormulaListOnly(t *testing.T) {
 	m, _ := newTestModel(t)
+	switchTo(t, m)
+	if m.kind != brew.Formula {
+		t.Fatalf("kind = %q, want the formula list", m.kind)
+	}
+
 	for _, width := range []int{32, 72, 120} {
 		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
 		header := strippedLines(m)[1]
 		if lipgloss.Width(header) != width {
 			t.Fatalf("at width %d header width=%d", width, lipgloss.Width(header))
 		}
-		if !strings.Contains(header, "[ Apps ]    Formulae") {
+		if !strings.Contains(header, "Apps    [ Formulae ]") {
 			t.Fatalf("at width %d the tab bar was disturbed: %q", width, header)
 		}
 		// Right aligned against the interior edge, so it reads as the column's sum.
-		if !strings.HasSuffix(header, "11.4GB│") {
+		if !strings.HasSuffix(header, "9.2GB│") {
 			t.Fatalf("at width %d the total is not flush right: %q", width, header)
 		}
 	}
 
-	m.sizes = nil
-	header := strippedLines(m)[1]
-	if strings.Contains(header, "GB") {
-		t.Fatalf("header claimed a total before measuring: %q", header)
+	// The cask list is not measured, so it must claim no total.
+	switchTo(t, m)
+	if header := strippedLines(m)[1]; strings.Contains(header, "GB") {
+		t.Fatalf("the cask header claimed a Cellar total: %q", header)
 	}
-	if lipgloss.Width(header) != 120 {
-		t.Fatalf("unmeasured header width=%d, want 120", lipgloss.Width(header))
+
+	m.sizes = nil
+	if header := strippedLines(m)[1]; strings.Contains(header, "GB") {
+		t.Fatalf("header claimed a total before measuring: %q", header)
 	}
 }
 
-// At the minimum supported width the total still fits: 22 cells of tab bar, one
-// gap, and at most 6 cells of value inside a 30-cell interior. Narrower than
-// that the value is omitted rather than clipped, so it can never eat into the
-// tab bar's pinned cell slots.
-func TestTotalFitsTheMinimumInteriorAndIsOtherwiseOmitted(t *testing.T) {
+// The layout guarantees the total fits at the minimum renderable width: the
+// interior is 30 cells and the tab bar plus a gap plus a six-cell total is 29.
+func TestTotalFitsTheMinimumInterior(t *testing.T) {
 	m, _ := newTestModel(t)
+	switchTo(t, m)
 	m.Update(tea.WindowSizeMsg{Width: 32, Height: 9})
-	if got := m.headerLine(); got != "[ Apps ]    Formulae    11.4GB" {
-		t.Fatalf("header at the minimum width=%q, want the total still shown", got)
+	if got := m.headerLine(); got != "  Apps    [ Formulae ]   9.2GB" {
+		t.Fatalf("header at the minimum width=%q", got)
 	}
-
-	m.width = 24
-	if got := m.headerLine(); got != activeListLabel(m.kind) {
-		t.Fatalf("header=%q, want the bare tab bar when the total cannot fit", got)
+	if got := lipgloss.Width(m.headerLine()); got > 30 {
+		t.Fatalf("header interior width=%d, want at most 30", got)
 	}
 }
 
@@ -673,4 +698,13 @@ func cellIndex(haystack, needle string) int {
 		return -1
 	}
 	return lipgloss.Width(haystack[:at])
+}
+
+// switchTo presses tab and drains the resulting load, so the caller is on the
+// other list with keys accepted again. A bare Update leaves the model loading,
+// where every ordinary key including the next tab is ignored.
+func switchTo(t *testing.T, m *model) {
+	t.Helper()
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	drainList(t, m, cmd)
 }

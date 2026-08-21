@@ -9,9 +9,14 @@ import (
 	"testing"
 )
 
-// Real `/usr/bin/du -k -d 1 /opt/homebrew/Cellar /opt/homebrew/Caskroom` rows,
-// captured on the measured machine. The full pass emits 345 lines: 304 Cellar
-// children, 39 Caskroom children, and one total per root.
+// Real `/usr/bin/du -k -d 1` rows captured on the measured machine. The full pass
+// emits 305 lines: 304 Cellar children and the root total.
+//
+// The Caskroom rows are kept here deliberately, as the evidence for why the
+// Caskroom is no longer measured and as the input that proves those rows are now
+// ignored. firefox reads 16 KB and zed 12 KB because their Caskroom entries are
+// symlinks to bundles in /Applications; the real firefox is over 500 MB. A size
+// column fed from these would be worse than no column.
 const realDuOutput = `276628	/opt/homebrew/Cellar/go
 712372	/opt/homebrew/Cellar/qemu
 1550732	/opt/homebrew/Cellar/llvm@22
@@ -24,7 +29,7 @@ const realDuOutput = `276628	/opt/homebrew/Cellar/go
 `
 
 func TestParseSizesReadsRealDuOutput(t *testing.T) {
-	sizes := parseSizes(realDuOutput, "/opt/homebrew/Cellar", "/opt/homebrew/Caskroom")
+	sizes := parseSizes(realDuOutput, "/opt/homebrew/Cellar")
 
 	for name, want := range map[string]int64{
 		"llvm@22": 1550732,
@@ -36,28 +41,22 @@ func TestParseSizesReadsRealDuOutput(t *testing.T) {
 			t.Errorf("KB(formula, %q) = %d, %v, want %d", name, got, ok, want)
 		}
 	}
-	for name, want := range map[string]int64{
-		"karabiner-elements": 48568,
-		"firefox":            16,
-		"zed":                12,
-	} {
-		if got, ok := sizes.KB(Cask, name); !ok || got != want {
-			t.Errorf("KB(cask, %q) = %d, %v, want %d", name, got, ok, want)
+	// Caskroom rows present in the input must be ignored rather than measured.
+	for _, name := range []string{"karabiner-elements", "firefox", "zed"} {
+		if _, ok := sizes.KB(Cask, name); ok {
+			t.Errorf("KB(cask, %q) reported a size; casks are not measured", name)
 		}
 	}
 
-	// The two root rows are the fleet totals, not packages.
-	if want := int64(9687960 + 2214836); sizes.Total != want {
-		t.Errorf("Total = %d, want %d", sizes.Total, want)
+	// The root row is the fleet total, not a package, and it is the Cellar alone.
+	if want := int64(9687960); sizes.Total != want {
+		t.Errorf("Total = %d, want the Cellar root row %d", sizes.Total, want)
 	}
 	if _, ok := sizes.KB(Formula, "Cellar"); ok {
 		t.Error("the Cellar root row was read as a package")
 	}
-	if _, ok := sizes.KB(Cask, "Caskroom"); ok {
-		t.Error("the Caskroom root row was read as a package")
-	}
-	if len(sizes.Formula) != 4 || len(sizes.Cask) != 3 {
-		t.Errorf("parsed %d formulae and %d casks, want 4 and 3", len(sizes.Formula), len(sizes.Cask))
+	if len(sizes.Formula) != 4 {
+		t.Errorf("parsed %d formulae, want 4", len(sizes.Formula))
 	}
 }
 
@@ -73,20 +72,18 @@ func TestParseSizesSkipsRowsItCannotRead(t *testing.T) {
 		"400\t/roots/Caskroom/app\r\n" +
 		"500\t/roots/Cellar\n"
 
-	sizes := parseSizes(output, "/roots/Cellar", "/roots/Caskroom")
+	sizes := parseSizes(output, "/roots/Cellar")
 	if got := slices.Sorted(maps.Keys(sizes.Formula)); !slices.Equal(got, []string{"kept"}) {
 		t.Fatalf("formula keys = %q, want only the readable direct child", got)
-	}
-	if got, ok := sizes.KB(Cask, "app"); !ok || got != 400 {
-		t.Fatalf("KB(cask, app) = %d, %v, want 400 after a CRLF row", got, ok)
 	}
 	if sizes.Total != 500 {
 		t.Fatalf("Total = %d, want only the one root row present", sizes.Total)
 	}
 }
 
-// writeRoots builds a Homebrew-shaped pair of roots and points the fake brew's
-// `--cellar` and `--caskroom` output at them.
+// writeRoots builds a Homebrew-shaped Cellar and points the fake brew's
+// `--cellar` output at it. A Caskroom is still created where the caller asks for
+// one, so a test can prove it is not measured.
 func writeRoots(t *testing.T, children map[string]int) (string, string, string) {
 	t.Helper()
 	base := t.TempDir()
@@ -102,17 +99,14 @@ func writeRoots(t *testing.T, children map[string]int) (string, string, string) 
 		}
 	}
 	argsFile := configureFakeBrew(t, "", "", 0, false)
-	fakeBrewStdoutByArg(t, map[string]string{
-		"--cellar":   cellar + "\n",
-		"--caskroom": caskroom + "\n",
-	})
+	fakeBrewStdoutByArg(t, map[string]string{"--cellar": cellar + "\n"})
 	return cellar, caskroom, argsFile
 }
 
 // This runs the real /usr/bin/du, so it pins the actual argv behaviour rather
 // than a recorded string: `-k` fixes the unit at kilobytes and `-d 1` reports
 // each package once, with its whole subtree summed and no grandchild rows.
-func TestSizesMeasuresBothRootsInOneRealDuPass(t *testing.T) {
+func TestSizesMeasuresTheCellarInOneRealDuPassAndSkipsTheCaskroom(t *testing.T) {
 	_, _, argsFile := writeRoots(t, map[string]int{
 		"Cellar/big/1.2.3/payload": 512,
 		"Cellar/small/0.1/payload": 4,
@@ -127,13 +121,13 @@ func TestSizesMeasuresBothRootsInOneRealDuPass(t *testing.T) {
 	if got := slices.Sorted(maps.Keys(sizes.Formula)); !slices.Equal(got, []string{"big", "small"}) {
 		t.Fatalf("formula keys = %q, want the two Cellar children only", got)
 	}
-	if got := slices.Sorted(maps.Keys(sizes.Cask)); !slices.Equal(got, []string{"app"}) {
-		t.Fatalf("cask keys = %q, want the one Caskroom child", got)
+	// The Caskroom child exists on disk and must still not be measured.
+	if _, ok := sizes.KB(Cask, "app"); ok {
+		t.Fatal("the Caskroom was measured; only the Cellar is")
 	}
 
 	big, _ := sizes.KB(Formula, "big")
 	small, _ := sizes.KB(Formula, "small")
-	app, _ := sizes.KB(Cask, "app")
 	// A 512 KB payload one level below the package directory: reported in KB
 	// (not 512-byte blocks, which would be ~1024, nor MB, which would be 1) and
 	// summed through the nested version directory.
@@ -143,51 +137,48 @@ func TestSizesMeasuresBothRootsInOneRealDuPass(t *testing.T) {
 	if big <= small || small < 4 {
 		t.Fatalf("big=%d small=%d, want the larger package to measure larger", big, small)
 	}
-	if app < 64 {
-		t.Fatalf("app = %d KB, want at least its 64 KB payload", app)
-	}
-	if sizes.Total < big+small+app {
-		t.Fatalf("Total = %d, want at least the sum of both roots' children", sizes.Total)
+	if sizes.Total < big+small {
+		t.Fatalf("Total = %d, want at least the sum of the Cellar's children", sizes.Total)
 	}
 
-	assertRecordedArgs(t, argsFile, []string{"--cellar"}, []string{"--caskroom"})
+	// One root query, not two: the Caskroom is never even asked for.
+	assertRecordedArgs(t, argsFile, []string{"--cellar"})
 }
 
-func TestSizesKeepsPartialMeasurementWhenOneRootIsMissing(t *testing.T) {
-	cellar, _, _ := writeRoots(t, map[string]int{"Cellar/kept/1.0/payload": 8})
-	if err := os.RemoveAll(filepath.Join(filepath.Dir(cellar), "Caskroom")); err != nil {
-		t.Fatalf("RemoveAll() error = %v", err)
+func TestSizesKeepsPartialMeasurementWhenASubtreeIsUnreadable(t *testing.T) {
+	cellar, _, _ := writeRoots(t, map[string]int{
+		"Cellar/kept/1.0/payload":   8,
+		"Cellar/denied/1.0/payload": 8,
+	})
+	// du exits nonzero on a directory it cannot descend into, while still
+	// measuring everything else.
+	if err := os.Chmod(filepath.Join(cellar, "denied"), 0o000); err != nil {
+		t.Fatalf("Chmod() error = %v", err)
 	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Join(cellar, "denied"), 0o755) })
 
-	// du exits nonzero for the missing root while still measuring the other one.
 	sizes, err := New().Sizes(context.Background())
 	if err != nil {
 		t.Fatalf("Sizes() error = %v, want a partial measurement", err)
 	}
 	if _, ok := sizes.KB(Formula, "kept"); !ok {
-		t.Fatalf("Formula = %#v, want the readable root measured", sizes.Formula)
-	}
-	if len(sizes.Cask) != 0 {
-		t.Fatalf("Cask = %#v, want nothing measured for the missing root", sizes.Cask)
+		t.Fatalf("Formula = %#v, want the readable package measured", sizes.Formula)
 	}
 }
 
 func TestSizesReportsFailureWhenNothingCouldBeMeasured(t *testing.T) {
 	base := t.TempDir()
 	argsFile := configureFakeBrew(t, "", "", 0, false)
-	fakeBrewStdoutByArg(t, map[string]string{
-		"--cellar":   filepath.Join(base, "gone-Cellar") + "\n",
-		"--caskroom": filepath.Join(base, "gone-Caskroom") + "\n",
-	})
+	fakeBrewStdoutByArg(t, map[string]string{"--cellar": filepath.Join(base, "gone-Cellar") + "\n"})
 
 	sizes, err := New().Sizes(context.Background())
 	if err == nil {
-		t.Fatalf("Sizes() = %#v, want an error when both roots are unreadable", sizes)
+		t.Fatalf("Sizes() = %#v, want an error when the root is unreadable", sizes)
 	}
-	if sizes.Total != 0 || len(sizes.Formula) != 0 || len(sizes.Cask) != 0 {
+	if sizes.Total != 0 || len(sizes.Formula) != 0 {
 		t.Fatalf("Sizes() = %#v, want the zero value beside its error", sizes)
 	}
-	assertRecordedArgs(t, argsFile, []string{"--cellar"}, []string{"--caskroom"})
+	assertRecordedArgs(t, argsFile, []string{"--cellar"})
 }
 
 func TestSizesRejectsAnEmptyRoot(t *testing.T) {
@@ -205,9 +196,12 @@ func TestSizesReportsAMissingBrew(t *testing.T) {
 }
 
 func TestSizesKBIgnoresAnInvalidKind(t *testing.T) {
-	sizes := Sizes{Formula: map[string]int64{"go": 1}, Cask: map[string]int64{"firefox": 2}}
+	sizes := Sizes{Formula: map[string]int64{"go": 1}}
 	if _, ok := sizes.KB(Kind("other"), "go"); ok {
 		t.Error("KB() reported a size for an invalid kind")
+	}
+	if _, ok := sizes.KB(Cask, "go"); ok {
+		t.Error("KB() reported a size for a cask; casks are never measured")
 	}
 	if _, ok := sizes.KB(Formula, "absent"); ok {
 		t.Error("KB() reported a size for an unmeasured package")

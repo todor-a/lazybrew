@@ -25,6 +25,8 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 - Listing formulae installed only as dependencies.
 - Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package.
 - **[REWRITE ADDITION]** Installing, upgrading, or pinning dependency-only formulae. Replaces the non-goal `Listing formulae installed only as dependencies.`, which forbade the only view that can answer what is consuming disk: on the measured machine the dependency-only set is 180 of 304 installed formulae and holds 7 of the 12 largest packages, including the single largest at 1.5 GB. Dependency-only formulae are now listed behind an explicit toggle that is off at startup (section 4), so the curated default view is unchanged.
+
+  This expands the destructive surface and the non-goal must not be read as shielding those rows. With the toggle on, a revealed dependency row is an ordinary `u` target like any other: nothing in this application refuses it. The only guards are Homebrew's own refusal to remove a formula another formula needs, and the info pane's `Removing this breaks <n> installed formula(e).` verdict, which is advisory and is withheld entirely when the dependents lookup fails.
 - Pre-authenticating with `sudo -v` or prompting for a password before Homebrew asks for one.
 - Caching or reusing administrator passwords.
 - Parsing a pseudo-terminal, scraping a sudo prompt, using `sudo -S`, or suspending the TUI for terminal authentication.
@@ -106,7 +108,7 @@ No Bubbles default key that is absent from this table may remain enabled. In par
 
 ### Search-edit mode
 
-Search is case-insensitive substring matching against `name + " " + version + " " + kind`. It preserves source list order; it does not fuzzy-rank results. The Go comparison is the substring relation after applying `strings.ToLower` to both operands.
+Search is case-insensitive substring matching against `name + " " + version + " " + kind`. **[REWRITE ADDITION]** The rendered origin token is appended, so a row displaying `dep` is reachable by that word; `formula` continues to match every formula, including the dependency-only ones whose rows no longer spell it. It preserves source list order; it does not fuzzy-rank results. The Go comparison is the substring relation after applying `strings.ToLower` to both operands.
 
 | Keys | Result |
 |---|---|
@@ -189,7 +191,11 @@ The two kinds must never be collapsed into one `brew outdated --quiet` call. A f
 The detail panel does distinguish the two, because it has room to. `Version` renders `(up to date)` only where a verdict was actually obtained; where the read failed and Homebrew's own text shows no newer version, the parenthetical is dropped and the installed version stands alone. This is the section 6 restraint about withheld evidence applied to freshness: a newer version parsed from `brew info` is independent evidence and still renders as `(latest <version>)` without a verdict.
 
 The marker's meaning is delegated wholesale to Homebrew: "`brew outdated` reports this", which is also the precondition for upgrading it. This specification deliberately does not restate Homebrew's rule for which `auto_updates` casks land in the default set — `postman` does and `firefox` does not, and that rule could not be established from the receipts. The consequence is accepted: if Homebrew changes that default, the markers change with no code change here and no failing test.
-| Installed size **[REWRITE ADDITION]** | — | `/usr/bin/du`, `-k`, `-d`, `1`, `<cellar>`, `<caskroom>` |
+| Installed size **[REWRITE ADDITION]** | formula | `/usr/bin/du`, `-k`, `-d`, `1`, `<cellar>` |
+
+**[REWRITE ADDITION]** The Caskroom is not measured, and no size is offered for a cask - not in the row, not in the header total. A cask's Caskroom entry is frequently a symlink to a bundle in `/Applications`, which `du` reports as about 12 KB; where it is not a symlink it may be a leftover installer package, which reports the installer rather than the application. Measured on the development machine: 29 of 39 casks read under 1 MB, `alt-tab` read 12 KB against a real 12 MB bundle, `google-chrome` read 683 MB only because the Caskroom holds a duplicate bundle, and the largest cask row was a 1.1 GB leftover Excel installer against a 2.4 GB application. Those numbers are not sizes.
+
+The consequence is deliberate and is the same restraint applied elsewhere in this document: where a number cannot be established, none is shown. The size column is reserved on the formula list only, and the header total is the Cellar's and renders on the formula list only, because a Cellar figure above cask rows would name a fleet the screen is not showing. The Cellar is 9.2 GB of the 11.3 GB this feature exists to account for, so the question is still answered where it can be answered honestly.
 
 **[REWRITE ADDITION]** The formula list vector replaces `brew`, `list`, `--formula`, `--installed-on-request`. That filter did not merely omit dependencies, it silently omitted formulae the user had explicitly requested. Measured: `--installed-on-request` reports 116 and `--no-installed-on-request` reports 180, against 304 installed — eight formulae appear under neither filter (`acli`, `codeburn`, `oh-my-posh`, `opencode`, `sshfs-mac`, `terraform`, `tidy-json`, `vault`), all third-party-tap installs whose `INSTALL_RECEIPT.json` records `"installed_on_request": true`, one of them 507 MB. Enumerating the unfiltered list and using `--no-installed-on-request` only as a marker surfaces those eight with the toggle off, at no extra cost, and keeps the row set reconcilable with the measured total. The eight-formula figure is machine- and version-specific and is recorded as evidence, not pinned as an invariant.
 
@@ -280,7 +286,9 @@ The `<origin-column>` is the parity kind column, repurposed. It is fixed-width p
 
 The `<size-column>` is 7 cells: one space plus 6 right-aligned. It is ALWAYS reserved once `rowWidth - 4 - originWidth - 7 >= 8`, and rendered blank until the section 5 pass lands, so the name column never reflows when sizes arrive seconds after first paint. `nameWidth = min(30, max(8, rowWidth - 4 - originWidth - sizeWidth))`. The worst case is the 32-column narrow layout with a scrollbar present: `rowWidth` 29, origin 7, size 7, giving a name column of 11 — so the pinned bound of at least 8 holds at every supported size.
 
-Sizes are spelled the way Homebrew's own info output spells them, so the row column and the info pane agree: `<n>KB` below 1024 KB, `<n>MB` below 1024 MB, `<n.n>GB` below 100 GB, and `<n>GB` above it. The value is at most 6 cells below 10 TB, which is what the reserved column is sized for; a package with no measurement renders an empty column rather than a zero.
+Sizes are spelled the way Homebrew's own info output spells them: `<n>KB` below 1024 KB, `<n>MB` below 1024 MB, `<n.n>GB` below 100 GB, and `<n>GB` above it. The value is at most 6 cells below 10000 GB, which is what the reserved column is sized for; a package with no measurement renders an empty column rather than a zero.
+
+**[REWRITE ADDITION]** The row column and the info pane do not agree, and must not be described as agreeing. The row is `du` allocated blocks rendered 1024-based; the info pane is Homebrew's own decimal byte sum. Measured: `llvm@22` renders 1.5GB in the row against 1.6GB in the pane, `qemu` 696MB against 729.1MB, and `go` 270MB against 239.8MB - 13% apart, and in the opposite direction from llvm. They answer the same question by different accounting, and a reader must not treat them as interchangeable.
 
 #### List scrollbar
 

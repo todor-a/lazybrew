@@ -26,6 +26,7 @@ const (
 	helperDescendantPIDEnv = "LAZYBREW_TEST_BREW_DESCENDANT_PID_FILE"
 	helperDescendantEnv    = "LAZYBREW_TEST_BREW_DESCENDANT"
 	helperStdoutByArgEnv   = "LAZYBREW_TEST_BREW_STDOUT_BY_ARG"
+	helperFailByArgEnv     = "LAZYBREW_TEST_BREW_FAIL_BY_ARG"
 )
 
 const (
@@ -43,6 +44,20 @@ func helperStdout() string {
 		}
 	}
 	return os.Getenv(helperStdoutEnv)
+}
+
+// helperFailure lets one test fail a single brew invocation of a multi-call
+// operation, selected by an argument that only that invocation carries. Without
+// it, a test can only fail every invocation, which fails the first one and never
+// reaches the call it meant to exercise.
+func helperFailure() (string, bool) {
+	for _, pair := range strings.Split(os.Getenv(helperFailByArgEnv), recordSeparator) {
+		arg, stderr, ok := strings.Cut(pair, pairSeparator)
+		if ok && slices.Contains(os.Args[1:], arg) {
+			return stderr, true
+		}
+	}
+	return "", false
 }
 
 func appendRecord(path, record string) error {
@@ -108,6 +123,10 @@ func TestMain(m *testing.M) {
 	}
 	_, _ = io.WriteString(os.Stdout, helperStdout())
 	_, _ = io.WriteString(os.Stderr, os.Getenv(helperStderrEnv))
+	if stderr, fail := helperFailure(); fail {
+		_, _ = io.WriteString(os.Stderr, stderr)
+		os.Exit(1)
+	}
 	code, err := strconv.Atoi(os.Getenv(helperExitEnv))
 	if err != nil {
 		os.Exit(96)
@@ -376,6 +395,7 @@ func configureFakeBrew(t *testing.T, stdout, stderr string, exitCode int, block 
 	t.Setenv(helperPIDEnv, pidFile)
 	t.Setenv(helperStdoutEnv, stdout)
 	t.Setenv(helperStdoutByArgEnv, "")
+	t.Setenv(helperFailByArgEnv, "")
 	t.Setenv(helperStderrEnv, stderr)
 	t.Setenv(helperExitEnv, strconv.Itoa(exitCode))
 	if block {
@@ -433,6 +453,14 @@ func assertRecordedArgs(t *testing.T, path string, want ...[]string) {
 			t.Fatalf("invocation %d argv = %#v, want %#v", i, got, want[i])
 		}
 	}
+}
+
+// fakeBrewFailByArg fails only the invocation carrying the given argument, with
+// the given stderr, leaving every other invocation of the same operation to
+// succeed.
+func fakeBrewFailByArg(t *testing.T, arg, stderr string) {
+	t.Helper()
+	t.Setenv(helperFailByArgEnv, arg+pairSeparator+stderr)
 }
 
 // fakeBrewStdoutByArg maps a distinguishing argument to the stdout the

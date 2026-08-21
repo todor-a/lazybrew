@@ -18,41 +18,47 @@ const duPath = "/usr/bin/du"
 var errMissingRoot = errors.New("Homebrew did not report its package root")
 
 // Sizes is one measurement of installed size, in KB, for every installed
-// package, keyed by kind and name.
+// formula, plus their total.
+//
+// Formulae only, and the Caskroom is not measured at all. A cask's Caskroom entry
+// is frequently a symlink to the bundle in /Applications, which du reports as
+// about 12 KB; where it is not a symlink it may be a leftover installer package,
+// which reports the installer rather than the app. Measured on the development
+// machine: 29 of 39 casks read under 1 MB, alt-tab read 12 KB against a real
+// 12 MB bundle, and the largest cask row was a 1.1 GB leftover Excel installer
+// against a 2.4 GB application. Those numbers are not sizes, so none is offered -
+// not per row, and not summed into a total either.
+//
+// The Cellar is different: it holds the real files, and it is 9.2 GB of the
+// 11.3 GB this screen exists to account for.
 type Sizes struct {
 	Formula map[string]int64
-	Cask    map[string]int64
 	Total   int64
 }
 
-// KB reports one package's measured size. A package with no measurement reports
-// false, which renders as a blank size column rather than as a zero.
+// KB reports one formula's measured size. Anything unmeasured - every cask, and
+// any formula du could not read - reports false, which renders as a blank size
+// column rather than as a zero.
 func (s Sizes) KB(kind Kind, name string) (int64, bool) {
-	var byName map[string]int64
-	switch kind {
-	case Cask:
-		byName = s.Cask
-	case Formula:
-		byName = s.Formula
-	default:
+	if kind != Formula {
 		return 0, false
 	}
-	size, ok := byName[name]
+	size, ok := s.Formula[name]
 	return size, ok
 }
 
-// Sizes measures every installed package in ONE du pass over the two roots that
+// Sizes measures every installed formula in ONE du pass over the Cellar that
 // Homebrew itself prints.
 //
 // There is no argv-only alternative: `brew info` carries no installed size (see
 // section 5 of SPEC.md), and per-package `brew info` would be 304 calls at
-// ~400ms each. One `du -k -d 1` over both roots yields every package size and
-// both fleet totals, measured at 2.1s warm and 5.6s cold over 11.3 GB.
+// ~400ms each. One `du -k -d 1` over the Cellar yields every formula size and
+// the fleet total, measured at about 2s warm over 9.2 GB.
 //
 // The layout assumption is exactly one sentence and exactly one directory level:
-// each direct child of those two roots is one package, named by the package name.
-// It is verified as a zero-diff match against `brew list --formula` (304) and
-// `brew list --cask -1` (39) on the measured machine.
+// each direct child of the Cellar is one formula, named by the formula name. It
+// is verified as a zero-diff match against `brew list --formula` (304) on the
+// measured machine.
 //
 // ponytail: no persisted cache. Ceiling is the pass cost, which is unbounded in
 // principle — a much larger Cellar or a slow volume only makes sizes arrive
@@ -63,17 +69,12 @@ func (c client) Sizes(ctx context.Context) (Sizes, error) {
 	if err != nil {
 		return Sizes{}, err
 	}
-	caskroom, err := c.root(ctx, "--caskroom")
-	if err != nil {
-		return Sizes{}, err
-	}
-
-	stdout, _, runErr := runTool(ctx, duPath, os.Environ(), []string{"-k", "-d", "1", cellar, caskroom})
-	sizes := parseSizes(string(stdout), cellar, caskroom)
+	stdout, _, runErr := runTool(ctx, duPath, os.Environ(), []string{"-k", "-d", "1", cellar})
+	sizes := parseSizes(string(stdout), cellar)
 	// du exits nonzero for one unreadable subdirectory while still measuring
 	// everything else, so partial sizes are kept. Nothing parsed means nothing
 	// was measured, and that is reported rather than rendered as zeroes.
-	if runErr != nil && len(sizes.Formula) == 0 && len(sizes.Cask) == 0 {
+	if runErr != nil && len(sizes.Formula) == 0 {
 		return Sizes{}, runErr
 	}
 	return sizes, nil
@@ -99,8 +100,8 @@ func (client) root(ctx context.Context, flag string) (string, error) {
 // SECURITY: the names read here are only ever used as map keys, looked up against
 // names that came from `brew list`. They never reach an argv, so this path cannot
 // introduce an unsafe package name and needs no second validator.
-func parseSizes(output, cellar, caskroom string) Sizes {
-	sizes := Sizes{Formula: make(map[string]int64), Cask: make(map[string]int64)}
+func parseSizes(output, cellar string) Sizes {
+	sizes := Sizes{Formula: make(map[string]int64)}
 	for _, rawLine := range strings.Split(output, "\n") {
 		field, path, ok := strings.Cut(strings.TrimRight(rawLine, "\r"), "\t")
 		if !ok {
@@ -110,15 +111,14 @@ func parseSizes(output, cellar, caskroom string) Sizes {
 		if err != nil {
 			continue
 		}
-		if path == cellar || path == caskroom {
-			sizes.Total += kb
+		if path == cellar {
+			// du prints the root last, so this is the whole Cellar and not a
+			// running sum of the rows above.
+			sizes.Total = kb
 			continue
 		}
-		switch filepath.Dir(path) {
-		case cellar:
+		if filepath.Dir(path) == cellar {
 			sizes.Formula[filepath.Base(path)] = kb
-		case caskroom:
-			sizes.Cask[filepath.Base(path)] = kb
 		}
 	}
 	return sizes

@@ -136,6 +136,9 @@ func TestOutdatedRefusesAnInvalidKindWithoutStartingBrew(t *testing.T) {
 	}
 	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid kind started brew; marker error = %v", err)
+	}
+}
+
 // The measured machine reports 116 formulae on request and 180 not on request
 // out of 304 installed, so eight explicitly requested third-party-tap formulae
 // appear under neither filter. Enumerating the unfiltered list and using
@@ -164,22 +167,14 @@ func TestFormulaListMarksOnlyTheReportedDependencySet(t *testing.T) {
 	)
 }
 
+// The marker call is load-bearing for every formula list load: its failure fails
+// the whole load rather than degrading to an unmarked list, because a silently
+// unmarked list would show every dependency as installed on request. Failing only
+// that invocation is the point - failing every invocation fails the enumeration
+// first and never reaches the marker call at all.
 func TestFormulaListFailsWhenTheDependencyMarkerCallFails(t *testing.T) {
-	dir := t.TempDir()
-	brewPath := dir + "/brew"
-	if err := os.Symlink(mustExecutable(t), brewPath); err != nil {
-		t.Fatalf("os.Symlink() error = %v", err)
-	}
-	t.Setenv("PATH", dir)
-	t.Setenv(helperModeEnv, "1")
-	t.Setenv(helperArgsEnv, "")
-	t.Setenv(helperPIDEnv, "")
-	t.Setenv(helperBlockEnv, "0")
-	t.Setenv(helperStdoutEnv, "onrequest\n")
-	t.Setenv(helperStdoutByArgEnv, "")
-	// Only the marker call fails, so the enumeration has already succeeded.
-	t.Setenv(helperStderrEnv, "Error: invalid option: --no-installed-on-request")
-	t.Setenv(helperExitEnv, "1")
+	argsFile := configureFakeBrew(t, "onrequest\n", "", 0, false)
+	fakeBrewFailByArg(t, "--no-installed-on-request", "Error: invalid option: --no-installed-on-request")
 
 	packages, err := New().List(context.Background(), Formula)
 	if err == nil || err.Error() != "Error: invalid option: --no-installed-on-request" {
@@ -188,6 +183,11 @@ func TestFormulaListFailsWhenTheDependencyMarkerCallFails(t *testing.T) {
 	if packages != nil {
 		t.Fatalf("List() returned %#v with a failed marker call, want no packages", packages)
 	}
+	// Both invocations ran: the enumeration succeeded and the marker call is the
+	// one that failed.
+	assertRecordedArgs(t, argsFile,
+		[]string{"list", "--formula"},
+		[]string{"list", "--formula", "--no-installed-on-request"})
 }
 
 func TestCaskListNeverReportsADependency(t *testing.T) {

@@ -62,7 +62,11 @@ type packageItem struct{ packageValue brew.Package }
 
 func (i packageItem) FilterValue() string {
 	p := i.packageValue
-	return p.Name + " " + p.Version + " " + string(p.Kind)
+	// The rendered origin token, not only the kind. A dependency row displays
+	// "dep" and no longer displays "formula", so matching on kind alone would
+	// make the row unreachable by the word on it and reachable by a word that is
+	// not. Both are included: "formula" still finds every formula.
+	return p.Name + " " + p.Version + " " + string(p.Kind) + " " + strings.TrimSpace(originColumn(p))
 }
 
 type packageDelegate struct{}
@@ -991,6 +995,8 @@ func markOutdated(packages []brew.Package, names []string, known bool) []brew.Pa
 		}
 	}
 	return packages
+}
+
 // startSizes measures the whole fleet in one pass, in its own command.
 //
 // It deliberately does not touch m.loading, m.spinnerActive, or the priority
@@ -999,6 +1005,13 @@ func markOutdated(packages []brew.Package, names []string, known bool) []brew.Pa
 // closure captures only the context and the id; every model mutation happens in
 // Update when the typed result lands.
 func (m *model) startSizes() tea.Cmd {
+	// Cancel the pass this one supersedes before overwriting its handles. Without
+	// this, r pressed twice inside the measurement window leaves the first du
+	// running with its context leaked and its completion handle no longer
+	// reachable from the supervisor, which can then neither cancel nor await it.
+	if m.sizesCancel != nil {
+		m.sizesCancel()
+	}
 	m.sizesID++
 	id := m.sizesID
 	m.sizesPending = true

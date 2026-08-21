@@ -70,14 +70,16 @@ func (m *model) baseView() string {
 // can never disturb the tab bar's pinned cell slots.
 func (m *model) headerLine() string {
 	label := activeListLabel(m.kind)
-	if m.sizes == nil {
+	// The total is the Cellar's, so it belongs on the list it describes. Rendering
+	// it over the cask list would put a formula figure above cask rows, with
+	// nothing on screen saying which fleet it counted.
+	if m.sizes == nil || m.kind != brew.Formula {
 		return label
 	}
 	total := humanKB(m.sizes.Total)
+	// The layout guarantees this fits: the minimum interior is 30 cells and the
+	// tab bar plus a gap plus a six-cell total is 29.
 	gap := m.width - 2 - lipgloss.Width(label) - lipgloss.Width(total)
-	if gap < 1 {
-		return label
-	}
 	return label + strings.Repeat(" ", gap) + total
 }
 
@@ -96,7 +98,7 @@ func (m *model) rowSize(pkg brew.Package) string {
 }
 
 // humanKB spells a size the way Homebrew's own info output does, so the row
-// column and the info pane agree. It never exceeds 6 cells below 10 TB: the
+// column and the info pane agree. It never exceeds 6 cells below 10000 GB: the
 // decimal is dropped from 100 GB up, where it would otherwise overflow.
 func humanKB(kilobytes int64) string {
 	switch {
