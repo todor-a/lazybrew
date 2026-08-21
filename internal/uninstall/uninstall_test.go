@@ -369,6 +369,19 @@ func TestFatalCleanupIsBoundedWhenCompletionSignalsAreWithheld(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// Withholding a completion signal is the point of this test, so the
+			// worker goroutines outlive the cleanup deadline still blocked on a
+			// child that traps TERM and sleeps. Those goroutines go on reading the
+			// seam variables above, so they must be joined before the restore
+			// registered earlier runs — t.Cleanup is LIFO, so registering the join
+			// second runs it first. The fake child ignores TERM but not KILL.
+			t.Cleanup(func() {
+				realJob := started.(*job)
+				if err := signalGroup(realJob.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+					t.Errorf("could not kill the withheld job's process group: %v", err)
+				}
+				waitForWorkersToStop(t, realJob)
+			})
 			started.Cancel()
 			resultDone := make(chan Result, 1)
 			go func() { resultDone <- started.Wait() }()
@@ -819,5 +832,29 @@ func TestCleanupFinalObservationWaitsForDirectChildCompletion(t *testing.T) {
 	result := <-resultDone
 	if result.CleanupErr != nil {
 		t.Fatalf("transient SIGKILL error survived a conclusive final observation: %v", result.CleanupErr)
+	}
+}
+
+// waitForWorkersToStop blocks until j has no live worker goroutines.
+//
+// Observing workerCount == 0 while holding workerMu is a sufficient join:
+// finishWorker decrements the count and reads the completion seam inside that
+// same critical section, so a zero read under the lock means the last worker's
+// own read has already happened.
+func waitForWorkersToStop(t *testing.T, j *job) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		j.workerMu.Lock()
+		remaining := j.workerCount
+		j.workerMu.Unlock()
+		if remaining == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("%d uninstall worker(s) still running at teardown; restoring the seams would race", remaining)
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
