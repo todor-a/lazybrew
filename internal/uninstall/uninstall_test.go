@@ -665,12 +665,14 @@ func TestCleanupWaitsForBothMaximumProcessGroupPhases(t *testing.T) {
 	oldSignal := signalTrackedGroup
 	oldObserve := observeTrackedGroupGone
 	oldKill := killDirectChild
-	var signals []syscall.Signal
-	killCalls := 0
+	oldChildDone := notifyChildDone
+	signalCalls := make(chan syscall.Signal, 2)
 	phaseCalls := make(chan time.Duration, 2)
 	phaseRelease := make(chan bool)
+	directKills := make(chan struct{}, 1)
+	childCompletions := make(chan struct{}, 1)
 	signalTrackedGroup = func(_ int, signal syscall.Signal) error {
-		signals = append(signals, signal)
+		signalCalls <- signal
 		return nil
 	}
 	observeTrackedGroupGone = func(_ int, phase time.Duration) bool {
@@ -678,51 +680,144 @@ func TestCleanupWaitsForBothMaximumProcessGroupPhases(t *testing.T) {
 		return <-phaseRelease
 	}
 	killDirectChild = func(cmd *exec.Cmd) error {
-		killCalls++
+		directKills <- struct{}{}
 		return oldKill(cmd)
+	}
+	notifyChildDone = func(done chan struct{}) {
+		childCompletions <- struct{}{}
+		close(done)
 	}
 	t.Cleanup(func() {
 		signalTrackedGroup = oldSignal
 		observeTrackedGroupGone = oldObserve
 		killDirectChild = oldKill
+		notifyChildDone = oldChildDone
 	})
-	installFakeBrew(t, "exit 0")
+	installFakeBrew(t, "trap '' TERM\nexec /bin/sleep 30")
 	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Formula})
 	if err != nil {
 		t.Fatal(err)
 	}
+	started.Cancel()
 	resultDone := make(chan Result, 1)
 	go func() { resultDone <- started.Wait() }()
-	for phase := 1; phase <= 2; phase++ {
-		select {
-		case duration := <-phaseCalls:
-			if duration != cleanupPhase {
-				t.Fatalf("phase %d duration = %v", phase, duration)
-			}
-		case <-time.After(time.Second):
-			t.Fatalf("phase %d did not start", phase)
-		}
-		select {
-		case result := <-resultDone:
-			t.Fatalf("job completed during phase %d: %+v", phase, result)
-		default:
-		}
-		if killCalls != 0 {
-			t.Fatalf("direct-child fallback ran during process-group phase %d", phase)
-		}
-		phaseRelease <- false
+
+	if signal := <-signalCalls; signal != syscall.SIGTERM {
+		t.Fatalf("first signal = %v", signal)
 	}
+	if duration := <-phaseCalls; duration != cleanupPhase {
+		t.Fatalf("TERM phase duration = %v", duration)
+	}
+	select {
+	case <-directKills:
+		t.Fatal("direct child was killed before the TERM observation completed")
+	default:
+	}
+	phaseRelease <- false
+	if signal := <-signalCalls; signal != syscall.SIGKILL {
+		t.Fatalf("second signal = %v", signal)
+	}
+	<-directKills
+	<-childCompletions
+	if duration := <-phaseCalls; duration != cleanupPhase {
+		t.Fatalf("SIGKILL phase duration = %v", duration)
+	}
+	select {
+	case result := <-resultDone:
+		t.Fatalf("job completed during final process-group observation: %+v", result)
+	default:
+	}
+	phaseRelease <- false
+
 	result := <-resultDone
 	if result.CleanupErr == nil {
 		t.Fatal("surviving group was not reported")
 	}
-	if len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL {
-		t.Fatalf("signals = %v", signals)
-	}
-	if killCalls != 1 {
-		t.Fatalf("direct-child fallback kill called %d times", killCalls)
-	}
 	if !strings.HasPrefix(result.CleanupErr.Error(), "fatal uninstall cleanup failure:") {
 		t.Fatalf("cleanup failure is not marked fatal: %v", result.CleanupErr)
+	}
+}
+
+func TestCleanupFinalObservationWaitsForDirectChildCompletion(t *testing.T) {
+	oldSignal := signalTrackedGroup
+	oldObserve := observeTrackedGroupGone
+	oldWait := waitCommand
+	oldKill := killDirectChild
+	oldChildDone := notifyChildDone
+	signalCalls := make(chan syscall.Signal, 2)
+	phaseCalls := make(chan time.Duration, 2)
+	directKills := make(chan struct{}, 1)
+	waitReturned := make(chan struct{}, 1)
+	releaseChildDone := make(chan struct{})
+	childDoneReleased := make(chan struct{})
+	signalTrackedGroup = func(_ int, signal syscall.Signal) error {
+		signalCalls <- signal
+		if signal == syscall.SIGKILL {
+			return syscall.EPERM
+		}
+		return nil
+	}
+	observeTrackedGroupGone = func(_ int, phase time.Duration) bool {
+		phaseCalls <- phase
+		select {
+		case <-childDoneReleased:
+			return true
+		default:
+			return false
+		}
+	}
+	waitCommand = func(cmd *exec.Cmd) error {
+		err := oldWait(cmd)
+		waitReturned <- struct{}{}
+		return err
+	}
+	killDirectChild = func(cmd *exec.Cmd) error {
+		directKills <- struct{}{}
+		return oldKill(cmd)
+	}
+	notifyChildDone = func(done chan struct{}) {
+		<-releaseChildDone
+		close(childDoneReleased)
+		close(done)
+	}
+	t.Cleanup(func() {
+		signalTrackedGroup = oldSignal
+		observeTrackedGroupGone = oldObserve
+		waitCommand = oldWait
+		killDirectChild = oldKill
+		notifyChildDone = oldChildDone
+	})
+	installFakeBrew(t, "trap '' TERM\nexec /bin/sleep 30")
+	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started.Cancel()
+	resultDone := make(chan Result, 1)
+	go func() { resultDone <- started.Wait() }()
+
+	if signal := <-signalCalls; signal != syscall.SIGTERM {
+		t.Fatalf("first signal = %v", signal)
+	}
+	if duration := <-phaseCalls; duration != cleanupPhase {
+		t.Fatalf("TERM phase duration = %v", duration)
+	}
+	if signal := <-signalCalls; signal != syscall.SIGKILL {
+		t.Fatalf("second signal = %v", signal)
+	}
+	<-directKills
+	<-waitReturned
+	select {
+	case duration := <-phaseCalls:
+		t.Fatalf("final observation started before childDone was released: %v", duration)
+	default:
+	}
+	close(releaseChildDone)
+	if duration := <-phaseCalls; duration != cleanupPhase {
+		t.Fatalf("SIGKILL phase duration = %v", duration)
+	}
+	result := <-resultDone
+	if result.CleanupErr != nil {
+		t.Fatalf("transient SIGKILL error survived a conclusive final observation: %v", result.CleanupErr)
 	}
 }

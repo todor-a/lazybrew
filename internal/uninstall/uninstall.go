@@ -371,19 +371,18 @@ func (j *job) cleanup() (error, bool) {
 	_ = j.endpoint.listener.Close()
 
 	var errs []error
+	var signalErrs []error
 	if err := signalTrackedGroup(j.pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		errs = append(errs, fmt.Errorf("SIGTERM process-group signal failed: %w", err))
+		signalErrs = append(signalErrs, fmt.Errorf("SIGTERM process-group signal failed: %w", err))
 	}
 	groupGone := false
 	if phase := cleanupPhaseBefore(deadline); phase > 0 {
 		groupGone = observeTrackedGroupGone(j.pgid, phase)
 	}
-	if !groupGone {
+	killedGroup := !groupGone
+	if killedGroup {
 		if err := signalTrackedGroup(j.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			errs = append(errs, fmt.Errorf("SIGKILL process-group signal failed: %w", err))
-		}
-		if phase := cleanupPhaseBefore(deadline); phase <= 0 || !observeTrackedGroupGone(j.pgid, phase) {
-			errs = append(errs, errors.New("process group still present after SIGKILL"))
+			signalErrs = append(signalErrs, fmt.Errorf("SIGKILL process-group signal failed: %w", err))
 		}
 	}
 
@@ -391,8 +390,14 @@ func (j *job) cleanup() (error, bool) {
 		errs = append(errs, fmt.Errorf("direct child kill could not be confirmed: %w", err))
 	}
 	j.processCancel()
-	if !waitBefore(j.childDone, deadline) {
+	childWaited := waitBefore(j.childDone, deadline)
+	if !childWaited {
 		errs = append(errs, errors.New("direct child Wait did not complete before cleanup deadline"))
+	}
+	if killedGroup && childWaited {
+		if phase := cleanupPhaseBefore(deadline); phase > 0 {
+			groupGone = observeTrackedGroupGone(j.pgid, phase)
+		}
 	}
 	workersStopped := waitBefore(j.workersDone, deadline)
 	if !workersStopped {
@@ -405,8 +410,15 @@ func (j *job) cleanup() (error, bool) {
 		known = append(known, pid)
 	}
 	j.mu.Unlock()
-	if err := observeKnownGone(known); err != nil {
-		errs = append(errs, fmt.Errorf("known descendant cleanup could not be confirmed: %w", err))
+	knownErr := observeKnownGone(known)
+	if !groupGone || knownErr != nil {
+		errs = append(errs, signalErrs...)
+	}
+	if killedGroup && !groupGone {
+		errs = append(errs, errors.New("process group still present after SIGKILL"))
+	}
+	if knownErr != nil {
+		errs = append(errs, fmt.Errorf("known descendant cleanup could not be confirmed: %w", knownErr))
 	}
 	if err := j.endpoint.closeExact(); err != nil {
 		errs = append(errs, fmt.Errorf("private endpoint cleanup failed: %w", err))

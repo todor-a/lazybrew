@@ -17,7 +17,7 @@ jobs:
           - macos-15-intel
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -31,7 +31,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: version
         name: Derive version
         shell: bash
@@ -59,11 +59,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: source
       - name: Check out tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: todor-a/homebrew-tap
           ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
