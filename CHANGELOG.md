@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/todor-a/lazybrew/compare/v0.2.2...v0.2.3) (2026-08-21)
+
+
+### Build and release
+
+* require a Conventional Commit pull request title ([00b9314](https://github.com/todor-a/lazybrew/commit/00b93141b36b8e8d892fd036f90240385f60f791))
+
 ## [0.2.2](https://github.com/todor-a/lazybrew/compare/v0.2.1...v0.2.2) (2026-08-21)
 
 
