@@ -172,6 +172,13 @@ func TestMissingBrewErrors(t *testing.T) {
 			},
 		},
 		{
+			name: "outdated",
+			run: func() error {
+				_, err := New().Outdated(context.Background(), Cask)
+				return err
+			},
+		},
+		{
 			name: "info",
 			run: func() error {
 				_, err := New().Info(context.Background(), Package{Name: "safe", Kind: Formula})

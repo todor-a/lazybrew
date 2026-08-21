@@ -22,6 +22,10 @@ import (
 // unrecognisable enough that neither a description nor a size is found, Format
 // returns the raw text unchanged. A Homebrew output change therefore degrades to
 // the old behaviour rather than to a blank pane.
+//
+// The one field not parsed from that text is the outdated verdict: it arrives on
+// the package value from `brew outdated`, so exactly one component decides the
+// word and the pane cannot form a second opinion from a version mismatch.
 
 // sizeInParentheses matches Homebrew's parenthesised size groups: a formula's
 // "(14 files, 52.8MB)" and a cask's "(511.7MB)".
@@ -140,14 +144,28 @@ func spaceBeforeUnit(value string) string {
 }
 
 // versionRow reports the installed version, and names the newer available one
-// when they differ. It never labels a package "outdated": an auto-updating cask
-// legitimately sits behind Homebrew's version without being out of date.
+// when they differ.
+//
+// The word "outdated" comes from pkg.Outdated — Homebrew's own `brew outdated`
+// verdict, carried in on the package value — and never from a version mismatch:
+// an auto-updating cask legitimately sits behind Homebrew's version without
+// being out of date. A mismatch alone therefore still renders as `(latest X)`
+// with no conclusion drawn, and `(up to date)` can never render for a package
+// Homebrew reports as outdated. The bare `(outdated)` fallback covers a revision
+// bump, where Homebrew flags the package but the two parsed versions match.
 func versionRow(pkg brew.Package, lines []string) string {
 	installed := installedVersion(pkg, lines)
 	if installed == "" {
 		return ""
 	}
-	if latest := latestVersion(lines); latest != "" && latest != installed {
+	latest := latestVersion(lines)
+	newer := latest != "" && latest != installed
+	switch {
+	case pkg.Outdated && newer:
+		return installed + "  (outdated, latest " + latest + ")"
+	case pkg.Outdated:
+		return installed + "  (outdated)"
+	case newer:
 		return installed + "  (latest " + latest + ")"
 	}
 	return installed + "  (up to date)"

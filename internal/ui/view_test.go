@@ -196,7 +196,8 @@ func TestColorProfileClassificationAndNoColor(t *testing.T) {
 		got := m.packageLine(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask}, true, 40)
 		plain := ansiSequence.ReplaceAllString(got, "")
 		want := lipgloss.NewStyle().Reverse(true).Bold(true).Render(plain)
-		if got != want || !strings.Contains(plain, "> Alpha") {
+		// ">  Alpha": marker, the blank freshness cell, then the name column.
+		if got != want || !strings.Contains(plain, ">  Alpha") {
 			t.Fatalf("ASCII selection=%q, want reverse+bold %q", got, want)
 		}
 	})
@@ -381,6 +382,38 @@ func TestScrollbarThumbSitsFlushAtBothEnds(t *testing.T) {
 	}
 	if last[0] == "█" {
 		t.Fatalf("thumb never moved off the top: %q", last)
+	}
+}
+
+func TestOutdatedRowCarriesAFixedFreshnessCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	plain := func(pkg brew.Package, selected bool) string {
+		return ansiSequence.ReplaceAllString(m.packageLine(pkg, selected, 40), "")
+	}
+	stale := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Outdated: true}, true)
+	fresh := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask}, true)
+	if !strings.HasPrefix(stale, " >↑ Alpha") {
+		t.Fatalf("outdated row=%q, want a marker then the ↑ cell", stale)
+	}
+	if !strings.HasPrefix(fresh, " >  Alpha") {
+		t.Fatalf("fresh row=%q, want a marker then a blank cell", fresh)
+	}
+	if lipgloss.Width(stale) != 40 || lipgloss.Width(fresh) != 40 {
+		t.Fatalf("row widths=%d and %d, want 40 each", lipgloss.Width(stale), lipgloss.Width(fresh))
+	}
+
+	unselected := plain(brew.Package{Name: "Alpha", Kind: brew.Cask, Outdated: true}, false)
+	if !strings.HasPrefix(unselected, "  ↑ Alpha") {
+		t.Fatalf("unselected outdated row=%q, want the cell independent of the marker", unselected)
+	}
+}
+
+// The freshness cell is one terminal cell wide by assumption, and every pinned
+// row width depends on it. A lipgloss bump that changed its measured width would
+// otherwise shift every row at runtime with no test noticing.
+func TestOutdatedGlyphIsOneCell(t *testing.T) {
+	if got := lipgloss.Width("↑"); got != 1 {
+		t.Fatalf("lipgloss.Width(\"↑\")=%d, want 1", got)
 	}
 }
 

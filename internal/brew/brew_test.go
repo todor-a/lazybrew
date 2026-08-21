@@ -87,6 +87,45 @@ func TestListCommandVectors(t *testing.T) {
 	}
 }
 
+func TestOutdatedCommandVectors(t *testing.T) {
+	tests := []struct {
+		name string
+		kind Kind
+		want []string
+	}{
+		{name: "cask", kind: Cask, want: []string{"outdated", "--cask", "--quiet"}},
+		{name: "formula", kind: Formula, want: []string{"outdated", "--formula", "--quiet"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := configureFakeBrew(t, "postman\n\nvault\n", "", 0, false)
+			names, err := New().Outdated(context.Background(), tt.kind)
+			if err != nil {
+				t.Fatalf("Outdated() error = %v", err)
+			}
+			if want := []string{"postman", "vault"}; !slices.Equal(names, want) {
+				t.Fatalf("Outdated() = %#v, want %#v", names, want)
+			}
+			assertRecordedArgs(t, argsFile, tt.want)
+			// --greedy would mark an auto-updating cask that brew will not upgrade.
+			if slices.Contains(tt.want, "--greedy") {
+				t.Fatal("the outdated vector must never carry --greedy")
+			}
+		})
+	}
+}
+
+func TestOutdatedRefusesAnInvalidKindWithoutStartingBrew(t *testing.T) {
+	argsFile := configureFakeBrew(t, "must not run", "", 0, false)
+	if _, err := New().Outdated(context.Background(), Kind("other")); err == nil {
+		t.Error("Outdated() accepted invalid kind")
+	}
+	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid kind started brew; marker error = %v", err)
+	}
+}
+
 func TestInfoCommandVectors(t *testing.T) {
 	tests := []struct {
 		name string

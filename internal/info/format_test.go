@@ -39,6 +39,67 @@ Required: macOS
 ==> Artifacts
 Firefox.app (App)`
 
+// Real `brew info --cask postman` output, trimmed after the Artifacts stanza.
+// postman is the one cask `brew outdated --cask` reports on this machine.
+const outdatedCaskRaw = `==> postman (Postman): 12.24.5 (auto_updates)
+Collaboration platform for API development
+https://www.postman.com/
+Installed (on request)
+/opt/homebrew/Caskroom/postman/12.24.4 (383MB)
+  Installed using the internal formulae.brew.sh API on 2026-08-21 at 09:14:56
+From: https://github.com/Homebrew/homebrew-cask/blob/HEAD/Casks/p/postman.rb
+==> Requirements
+Required: macOS >= 11
+==> Artifacts
+Postman.app (App)`
+
+func TestFormatSaysOutdatedOnlyOnHomebrewsVerdict(t *testing.T) {
+	tests := []struct {
+		name     string
+		pkg      brew.Package
+		raw      string
+		want     string
+		unwanted string
+	}{
+		{
+			name: "reported and a newer version parses",
+			pkg:  brew.Package{Name: "postman", Kind: brew.Cask, Outdated: true},
+			raw:  outdatedCaskRaw,
+			want: "Version    12.24.4  (outdated, latest 12.24.5)",
+		},
+		{
+			name:     "the same output unreported draws no conclusion",
+			pkg:      brew.Package{Name: "postman", Kind: brew.Cask},
+			raw:      outdatedCaskRaw,
+			want:     "Version    12.24.4  (latest 12.24.5)",
+			unwanted: "outdated",
+		},
+		{
+			// A revision bump: Homebrew flags the package while both parsed
+			// versions match, so the row must not read as up to date.
+			name: "reported with no distinct newer version",
+			pkg:  brew.Package{Name: "ast-grep", Kind: brew.Formula, Outdated: true},
+			raw:  formulaRaw,
+			want: "Version    0.45.1  (outdated)",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Format(tt.pkg, tt.raw, Dependents{})
+			if !strings.Contains(got, tt.want) {
+				t.Fatalf("missing %q in:\n%s", tt.want, got)
+			}
+			if tt.unwanted != "" && strings.Contains(got, tt.unwanted) {
+				t.Fatalf("contains %q in:\n%s", tt.unwanted, got)
+			}
+			if tt.pkg.Outdated && strings.Contains(got, "(up to date)") {
+				t.Fatalf("claimed up to date for a package brew reports outdated:\n%s", got)
+			}
+		})
+	}
+}
+
 func TestFormatFormulaKeepsDecisionFieldsAndDropsNoise(t *testing.T) {
 	pkg := brew.Package{Name: "ast-grep", Kind: brew.Formula}
 	got := Format(pkg, formulaRaw, Dependents{Known: true})

@@ -16,15 +16,21 @@ const (
 )
 
 // Package is one row returned by Homebrew's installed-package inventory.
+//
+// Outdated carries Homebrew's own `brew outdated` verdict. Like Version it is
+// display data, not identity: it is not part of the info cache key and no argv
+// reads it.
 type Package struct {
-	Name    string
-	Version string
-	Kind    Kind
+	Name     string
+	Version  string
+	Kind     Kind
+	Outdated bool
 }
 
 // Homebrew exposes the read-only operations used by the application.
 type Homebrew interface {
 	List(context.Context, Kind) ([]Package, error)
+	Outdated(context.Context, Kind) ([]string, error)
 	Info(context.Context, Package) (string, error)
 	Uses(context.Context, Package) ([]string, error)
 }
@@ -54,6 +60,29 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 		return nil, err
 	}
 	return parseList(string(stdout), kind), nil
+}
+
+// Outdated reports the names of kind that `brew upgrade` would act on.
+//
+// Never `--greedy`. Homebrew's default set already excludes the auto-updating
+// casks it will not touch, and adding the flag would mark a cask that legitimately
+// sits behind Homebrew's version as out of date — the exact false claim the info
+// pane refuses to make. Measured here: the default cask set is {postman}; with
+// `--greedy` it is 14 names, including firefox, which brew will not upgrade.
+//
+// Per kind rather than one combined call: a formula and a cask can share a name,
+// and the marker set is consulted per kind.
+func (client) Outdated(ctx context.Context, kind Kind) ([]string, error) {
+	flag, err := kindFlag(kind)
+	if err != nil {
+		return nil, err
+	}
+
+	stdout, _, err := run(ctx, []string{"outdated", flag, "--quiet"})
+	if err != nil {
+		return nil, err
+	}
+	return parseNames(string(stdout)), nil
 }
 
 func (client) Info(ctx context.Context, pkg Package) (string, error) {
