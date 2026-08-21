@@ -9,7 +9,7 @@ class Lazybrew < Formula
   depends_on "go" => :build
 
   def install
-    system "go", "build", *std_go_args(ldflags: "-s -w"), "./cmd/lazybrew"
+    system "go", "build", *std_go_args(ldflags: "-s -w -extldflags=-Wl,-adhoc_codesign"), "./cmd/lazybrew"
   end
 
   test do
