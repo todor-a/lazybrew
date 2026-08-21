@@ -865,10 +865,11 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 		// annotated packages reach the existing message, cache, and renderers, so
 		// a cached kind switch keeps its marks and nothing downstream changes.
 		var (
-			wg       sync.WaitGroup
-			packages []brew.Package
-			listErr  error
-			outdated []string
+			wg            sync.WaitGroup
+			packages      []brew.Package
+			listErr       error
+			outdated      []string
+			outdatedKnown bool
 		)
 		wg.Add(2)
 		go func() {
@@ -881,7 +882,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			// lookup is: the list still loads and simply carries no marks. Absence
 			// of evidence must never render as an assurance.
 			if names, err := homebrew.Outdated(ctx, kind); err == nil {
-				outdated = names
+				outdated, outdatedKnown = names, true
 			}
 		}()
 		wg.Wait()
@@ -890,7 +891,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			id:       id,
 			kind:     kind,
 			purpose:  purpose,
-			packages: markOutdated(packages, outdated),
+			packages: markOutdated(packages, outdated, outdatedKnown),
 			err:      listErr,
 			done:     done,
 		}
@@ -901,7 +902,12 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 // outdated set is matched by name against the visible rows only; for formulae it
 // legitimately also names the dependency-only ones the list never shows, so its
 // size and the list's are unrelated.
-func markOutdated(packages []brew.Package, names []string) []brew.Package {
+func markOutdated(packages []brew.Package, names []string, known bool) []brew.Package {
+	// Stamped on every row, not only the named ones, so the detail panel can tell
+	// "Homebrew says this is current" from "Homebrew was never asked".
+	for i := range packages {
+		packages[i].OutdatedKnown = known
+	}
 	if len(names) == 0 {
 		return packages
 	}

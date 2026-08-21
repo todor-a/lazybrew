@@ -101,7 +101,9 @@ func TestFormatSaysOutdatedOnlyOnHomebrewsVerdict(t *testing.T) {
 }
 
 func TestFormatFormulaKeepsDecisionFieldsAndDropsNoise(t *testing.T) {
-	pkg := brew.Package{Name: "ast-grep", Kind: brew.Formula}
+	// OutdatedKnown: Homebrew was asked and reported this package as current, which
+	// is what entitles the panel to say so.
+	pkg := brew.Package{Name: "ast-grep", Kind: brew.Formula, OutdatedKnown: true}
 	got := Format(pkg, formulaRaw, Dependents{Known: true})
 
 	for _, want := range []string{
@@ -229,5 +231,34 @@ func TestDetailsPropagatesInfoFailure(t *testing.T) {
 	)
 	if _, err := load(context.Background(), brew.Package{Name: "x", Kind: brew.Formula}); err == nil {
 		t.Fatal("expected the info failure to propagate")
+	}
+}
+
+// A failed `brew outdated` read must not become a freshness assurance. This is
+// the same restraint the dependents row already follows: absence of evidence is
+// reported as absence, not as good news.
+func TestFormatWithholdsFreshnessWhenTheOutdatedReadFailed(t *testing.T) {
+	base := brew.Package{Name: "ast-grep", Kind: brew.Formula}
+
+	asked := base
+	asked.OutdatedKnown = true
+	if got := Format(asked, formulaRaw, Dependents{Known: true}); !strings.Contains(got, "0.45.1  (up to date)") {
+		t.Fatalf("a successful read should say so:\n%s", got)
+	}
+
+	// Same text, no verdict obtained.
+	unknown := Format(base, formulaRaw, Dependents{Known: true})
+	if strings.Contains(unknown, "up to date") {
+		t.Fatalf("claimed freshness with no verdict obtained:\n%s", unknown)
+	}
+	if !strings.Contains(unknown, "Version    0.45.1") {
+		t.Fatalf("dropped the installed version along with the verdict:\n%s", unknown)
+	}
+
+	// A newer version parsed from Homebrew's own text is independent evidence and
+	// still stands without an outdated verdict.
+	behind := brew.Package{Name: "firefox", Kind: brew.Cask}
+	if got := Format(behind, caskRaw, Dependents{}); !strings.Contains(got, "153.0.4  (latest 154.0)") {
+		t.Fatalf("text evidence of a newer version should survive:\n%s", got)
 	}
 }

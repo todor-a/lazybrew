@@ -109,9 +109,10 @@ func TestOutdatedCommandVectors(t *testing.T) {
 			}
 			assertRecordedArgs(t, argsFile, tt.want)
 			// --greedy would mark an auto-updating cask that brew will not upgrade.
-			if slices.Contains(tt.want, "--greedy") {
-				t.Fatal("the outdated vector must never carry --greedy")
-			}
+			// Read back from the recording, not from tt.want: asserting against the
+			// expectation table only fires if someone edits the table, and never
+			// observes the vector the code actually built.
+			assertArgAbsent(t, argsFile, "--greedy")
 		})
 	}
 }

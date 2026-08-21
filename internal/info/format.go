@@ -167,6 +167,11 @@ func versionRow(pkg brew.Package, lines []string) string {
 		return installed + "  (outdated)"
 	case newer:
 		return installed + "  (latest " + latest + ")"
+	case !pkg.OutdatedKnown:
+		// No verdict was obtained and the text shows nothing newer, so nothing is
+		// known about freshness. Say nothing rather than assure, the same way a
+		// failed dependent lookup withholds its row instead of claiming safety.
+		return installed
 	}
 	return installed + "  (up to date)"
 }

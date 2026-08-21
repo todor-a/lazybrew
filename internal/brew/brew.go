@@ -25,6 +25,12 @@ type Package struct {
 	Version  string
 	Kind     Kind
 	Outdated bool
+	// OutdatedKnown records whether a `brew outdated` verdict was actually
+	// obtained. Without it a failed read is indistinguishable from a confirmed
+	// fresh package, and the detail panel would answer "up to date" from no
+	// evidence at all. Display state only: it is outside the cache key, the
+	// filter value, and every argv, exactly as Outdated is.
+	OutdatedKnown bool
 }
 
 // Homebrew exposes the read-only operations used by the application.
