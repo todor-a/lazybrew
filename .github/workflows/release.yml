@@ -1,7 +1,10 @@
 name: Release
 
 on:
+  pull_request:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -24,84 +27,53 @@ jobs:
       - run: go test -ldflags="-extldflags=-Wl,-adhoc_codesign" ./...
 
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: macos-14
     permissions:
       contents: write
-    outputs:
-      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
-      - id: version
-        name: Derive version
-        shell: bash
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-      - name: Create release assets
-        shell: bash
-        run: |
-          version="${{ steps.version.outputs.version }}"
-          archive="lazybrew-${version}.tar.gz"
-          git archive --format=tar --prefix="lazybrew-${version}/" HEAD | gzip -n > "$archive"
-          sha256sum "$archive" > checksums.txt
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          version="${{ steps.version.outputs.version }}"
-          gh release create "$GITHUB_REF_NAME" \
-            "lazybrew-${version}.tar.gz" checksums.txt \
-            --title "lazybrew ${version}" \
-            --generate-notes
-
-  tap:
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
         with:
-          path: source
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Release with GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.17.0
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Check out tap
         uses: actions/checkout@v5
         with:
           repository: todor-a/homebrew-tap
           ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
           path: tap
-      - name: Download and verify release archive
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Update tap cask
         shell: bash
         run: |
-          version="${{ needs.release.outputs.version }}"
-          archive="lazybrew-${version}.tar.gz"
-          mkdir release
-          gh release download "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern "$archive" \
-            --pattern checksums.txt \
-            --dir release
-          (cd release && sha256sum --check --strict checksums.txt)
-          sha256sum "release/$archive" | cut -d ' ' -f 1 > release/archive.sha256
-      - name: Update tap formula
-        shell: bash
-        run: |
-          version="${{ needs.release.outputs.version }}"
-          sha256="$(cat release/archive.sha256)"
-          ruby -e '
-            template = File.read(ARGV[0])
-            output = template.gsub("@VERSION@", ARGV[1]).gsub("@SHA256@", ARGV[2])
-            abort "formula placeholders were not replaced" if output.include?("@VERSION@") || output.include?("@SHA256@")
-            File.write(ARGV[3], output)
-          ' source/.github/homebrew/lazybrew.rb "$version" "$sha256" tap/Formula/lazybrew.rb
+          mkdir -p tap/Casks
+          cp dist/homebrew/Casks/lazybrew.rb tap/Casks/lazybrew.rb
+          rm -f tap/Formula/lazybrew.rb
+          ruby -rjson -e '
+            path = "tap/tap_migrations.json"
+            migrations = File.exist?(path) ? JSON.parse(File.read(path)) : {}
+            migrations["lazybrew"] = "lazybrew"
+            File.write(path, JSON.pretty_generate(migrations) + "\n")
+          '
 
           cd tap
-          if [[ -z "$(git status --porcelain -- Formula/lazybrew.rb)" ]]; then
-            echo "Formula already up to date"
+          if [[ -z "$(git status --porcelain -- Casks/lazybrew.rb Formula/lazybrew.rb tap_migrations.json)" ]]; then
+            echo "Tap already up to date"
             exit 0
           fi
+
+          version="${GITHUB_REF_NAME#v}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/lazybrew.rb
+          git add -A -- Casks/lazybrew.rb Formula/lazybrew.rb tap_migrations.json
           git commit -m "lazybrew ${version}"
           git push origin HEAD:main

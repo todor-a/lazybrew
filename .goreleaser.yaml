@@ -1,0 +1,56 @@
+version: 2
+
+project_name: lazybrew
+
+builds:
+  - id: lazybrew
+    main: ./cmd/lazybrew
+    binary: lazybrew
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    env:
+      - CGO_ENABLED=1
+      - 'CC=clang -arch {{ if eq .Arch "amd64" }}x86_64{{ else }}arm64{{ end }}'
+    ldflags:
+      - -s -w -extldflags=-Wl,-adhoc_codesign
+
+archives:
+  - id: lazybrew
+    ids:
+      - lazybrew
+    formats:
+      - tar.gz
+    name_template: 'lazybrew_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+release:
+  name_template: 'lazybrew {{ .Version }}'
+  replace_existing_artifacts: true
+
+homebrew_casks:
+  - name: lazybrew
+    ids:
+      - lazybrew
+    binaries:
+      - lazybrew
+    repository:
+      owner: todor-a
+      name: homebrew-tap
+    directory: Casks
+    homepage: https://github.com/todor-a/lazybrew
+    description: Terminal UI for inspecting and uninstalling Homebrew packages
+    skip_upload: true
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/lazybrew"]
+          end
