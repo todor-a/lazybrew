@@ -167,20 +167,26 @@ func versionRow(pkg brew.Package, lines []string) string {
 		latest = latestVersion(lines)
 	}
 	newer := latest != "" && latest != installed
-	switch {
-	case pkg.Outdated && newer:
-		return installed + "  (outdated, latest " + latest + ")"
-	case pkg.Outdated:
-		return installed + "  (outdated)"
-	case newer:
-		return installed + "  (latest " + latest + ")"
-	case !pkg.OutdatedKnown:
+	var state []string
+	if pkg.Pinned {
+		state = append(state, "pinned")
+	}
+	if pkg.Outdated {
+		state = append(state, "outdated")
+	}
+	if newer {
+		state = append(state, "latest "+latest)
+	}
+	if len(state) == 0 && !pkg.OutdatedKnown {
 		// No verdict was obtained and the text shows nothing newer, so nothing is
 		// known about freshness. Say nothing rather than assure, the same way a
 		// failed dependent lookup withholds its row instead of claiming safety.
 		return installed
 	}
-	return installed + "  (up to date)"
+	if len(state) == 0 {
+		state = append(state, "up to date")
+	}
+	return installed + "  (" + strings.Join(state, ", ") + ")"
 }
 
 func installedVersion(pkg brew.Package, lines []string) string {

@@ -2035,6 +2035,20 @@ func TestUpgradeStartsNothingForAPackageThatIsUpToDate(t *testing.T) {
 	}
 }
 
+func TestUpgradeStartsNothingForAPinnedFormula(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	m.setPackages([]brew.Package{{Name: "Alpha", Kind: brew.Formula, Outdated: true, Pinned: true}}, 0)
+
+	m.updateNormal(textKey("u"))
+
+	if m.mode != modeNormal || m.confirmation != nil || uninstaller.starts != 0 {
+		t.Fatalf("pinned upgrade reached confirmation: mode=%v confirmation=%#v starts=%d", m.mode, m.confirmation, uninstaller.starts)
+	}
+	if m.status != "Alpha is pinned" || m.priority {
+		t.Fatalf("status=%q priority=%v, want ordinary pinned status", m.status, m.priority)
+	}
+}
+
 // The two verbs share one confirmation path, and the verb travels with the
 // snapshot so every string and the argv agree on which operation is running.
 func TestBothVerbsShareTheConfirmationPathAndCarryTheirOwnWords(t *testing.T) {

@@ -15,14 +15,14 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	sizes := brew.Sizes{Formula: map[string]int64{"alpha": 1024}, Total: 2048}
 	saveSnapshot(path, snapshot{
 		Lists: map[brew.Kind][]brew.Package{
-			brew.Cask: {{Name: "alpha", Version: "1.0", Kind: brew.Cask, Outdated: true, OutdatedKnown: true}},
+			brew.Formula: {{Name: "alpha", Version: "1.0", Kind: brew.Formula, Outdated: true, OutdatedKnown: true, Pinned: true}},
 		},
 		Sizes: &sizes,
 	})
 
 	loaded := loadSnapshot(path)
-	casks := loaded.Lists[brew.Cask]
-	if len(casks) != 1 || casks[0].Name != "alpha" || !casks[0].Outdated || !casks[0].OutdatedKnown {
+	formulae := loaded.Lists[brew.Formula]
+	if len(formulae) != 1 || formulae[0].Name != "alpha" || !formulae[0].Outdated || !formulae[0].OutdatedKnown || !formulae[0].Pinned {
 		t.Fatalf("loaded lists %+v", loaded.Lists)
 	}
 	if loaded.Sizes == nil || loaded.Sizes.Formula["alpha"] != 1024 || loaded.Sizes.Total != 2048 {

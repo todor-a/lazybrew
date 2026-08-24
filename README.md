@@ -13,7 +13,7 @@
 ## Features
 
 - **Instant startup** — the last session's inventory paints in the first frame from an on-disk snapshot, then refreshes underneath. No more staring at "Loading…".
-- **Outdated, with the actual versions** — `↑` marks plus `12.24.4 → 12.24.5` right in the row, straight from `brew outdated`. Never `--greedy`, so it will not claim an auto-updating cask is stale.
+- **Outdated, with the actual versions** — `↑` marks plus `12.24.4 → 12.24.5` right in the row, straight from `brew outdated`; pinned formulae show `P` instead.
 - **Size accounting** — every formula's installed size from one `du` pass over the Cellar, with the fleet total. Casks are deliberately unsized: their Caskroom entries lie, and lazybrew does not print numbers that are not sizes.
 - **A real table** — column headings with a sort cue; `o` cycles name ↑ → size ↓ → size ↑ → name ↓ per screen.
 - **Untrusted-tap marks** — `!` on packages whose third-party tap Homebrew refuses to load, with brew's own `brew trust` remedy shown in the info pane.
@@ -47,7 +47,7 @@ Upgrade or remove lazybrew itself with `brew upgrade --cask lazybrew` / `brew un
 | Act | |
 | --- | --- |
 | `d` | Uninstall the selected package (confirm first) |
-| `u` | Upgrade the selected package — only offered when Homebrew reports it outdated |
+| `u` | Upgrade the selected package — only when Homebrew reports it outdated and it is not pinned |
 
 While an action runs you can keep browsing, and `d`/`u` on other rows queues them.
 

@@ -385,6 +385,11 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if pkg.Outdated {
 		freshness = "\u2191"
 	}
+	// A pin wins over outdated because it explains why the offered upgrade will
+	// not run. P is a stable one-cell glyph in every supported terminal profile.
+	if pkg.Pinned {
+		freshness = "P"
+	}
 	// Untrusted claims the same cell, and wins it: brew refuses to even load
 	// such a package's definition, so the refusal explains every other failure
 	// on the row (info, upgrade) and is the state the user must clear first,
