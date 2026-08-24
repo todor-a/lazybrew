@@ -34,6 +34,12 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -race -ldflags="-extldflags=-Wl,-adhoc_codesign" ./...
+      # These matrix contexts are already required on main. Nesting the E2E
+      # gate here makes it required for release-please without broadening
+      # branch protection for every ordinary PR.
+      - name: Run black-box E2E for release-please
+        if: startsWith(github.head_ref, 'release-please--')
+        run: go test -count=1 -tags=e2e ./e2e
 
   # Maintains a release pull request that accumulates the version bump and the
   # CHANGELOG.md entry. Merging that pull request is what creates the tag and the
