@@ -35,7 +35,7 @@ func TestMinimumSizeAndExactThirtyCellFooter(t *testing.T) {
 		t.Fatalf("footer row width=%d, want 32", len(footerRunes))
 	}
 	got := string(footerRunes[1:31])
-	want := "[/ or s] search  tab switch  u"
+	want := "Search: / | Switch: tab | Unin"
 	if got != want {
 		t.Fatalf("footer interior=%q, want %q", got, want)
 	}
@@ -143,7 +143,7 @@ func TestModeSpecificStatusAndFooterStrings(t *testing.T) {
 	if !strings.Contains(lines[m.height-3], "Refreshing casks...") {
 		t.Fatalf("refresh status=%q", lines[m.height-3])
 	}
-	if !strings.Contains(lines[m.height-2], "q quit") || strings.Contains(lines[m.height-2], "search") {
+	if !strings.Contains(lines[m.height-2], "Quit: q") || strings.Contains(lines[m.height-2], "Search:") {
 		t.Fatalf("refresh footer=%q", lines[m.height-2])
 	}
 
@@ -422,7 +422,7 @@ func TestFooterListsEveryNormalKey(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit"
+	want := "Search: / | Switch: tab | Uninstall: u | Deps: d | Sort: o | Theme: t | Refresh: r | Quit: q"
 	if footer != want {
 		t.Fatalf("footer=%q, want %q", footer, want)
 	}
@@ -707,4 +707,72 @@ func switchTo(t *testing.T, m *model) {
 	t.Helper()
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	drainList(t, m, cmd)
+}
+
+// backgroundActiveAtTrailingBlanks walks the row's SGR sequences and reports
+// whether the theme background is still armed at the first trailing blank.
+// Searching for the sequence anywhere in the row is not enough: an enclosing
+// style emits one too, and the bleed guarded against here is precisely that its
+// background stops at the first inner reset while the padding comes after it.
+func backgroundActiveAtTrailingBlanks(row, backgroundParam string) (armed, hasPadding bool) {
+	plain := ansiSequence.ReplaceAllString(row, "")
+	trimmed := strings.TrimRight(plain, " ")
+	if trimmed == plain {
+		return false, false
+	}
+	lastVisible := len([]rune(trimmed))
+
+	seen := 0
+	for i := 0; i < len(row); {
+		if loc := ansiSequence.FindStringIndex(row[i:]); loc != nil && loc[0] == 0 {
+			seq := row[i : i+loc[1]]
+			switch {
+			case seq == "\x1b[m", seq == "\x1b[0m":
+				armed = false
+			case strings.Contains(seq, backgroundParam):
+				armed = true
+			}
+			i += loc[1]
+			continue
+		}
+		if seen == lastVisible {
+			return armed, true
+		}
+		seen++
+		i++
+	}
+	return armed, true
+}
+
+// Two-tone means every footer segment carries the full role rather than relying
+// on an enclosing style, and the trailing padding does too. Otherwise a theme
+// whose footer has a background ends that background at the first inner reset,
+// leaving the rest of the row bare.
+func TestFooterKeepsItsBackgroundAcrossTheWholeRow(t *testing.T) {
+	m, _ := newTestModel(t)
+	// Wide enough that the footer does not fill the row, so there is padding.
+	m.Update(tea.WindowSizeMsg{Width: 130, Height: 12})
+
+	bright := -1
+	for i, candidate := range themes {
+		if candidate.name == "Bright" {
+			bright = i
+		}
+	}
+	if bright < 0 || themes[bright].footer.background == "" {
+		t.Fatal("no theme with a footer background left to exercise this")
+	}
+	m.themeIndex = bright
+
+	row := m.footerLine(m.width - 2)
+	if got := lipgloss.Width(row); got != m.width-2 {
+		t.Fatalf("footer width=%d, want %d", got, m.width-2)
+	}
+	armed, hasPadding := backgroundActiveAtTrailingBlanks(row, "47")
+	if !hasPadding {
+		t.Fatalf("no padding at width %d, so this asserts nothing", m.width-2)
+	}
+	if !armed {
+		t.Fatalf("footer padding lost the theme background: %q", row)
+	}
 }

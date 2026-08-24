@@ -402,14 +402,38 @@ func (m *model) footerLine(width int) string {
 	case m.mode == modeUninstall || m.mode == modePassword:
 		keys = progressHelp
 	}
+	// Two-tone, and every segment carries the full footer role rather than relying
+	// on an enclosing style. A single outer Render over pre-styled segments would
+	// end its own background at the first inner reset, which is visible on any
+	// theme whose footer has a background.
+	footer := m.currentTheme().footer
 	h := m.help
 	h.SetWidth(0)
-	h.Styles = help.Styles{}
-	return roleStyle(m.currentTheme().footer).Render(fit(h.View(keys), width))
+	h.ShortSeparator = " | "
+	h.Styles = help.Styles{
+		ShortKey:       roleStyle(footer),
+		ShortDesc:      roleStyle(footer).Bold(true),
+		ShortSeparator: roleStyle(footer).Faint(true),
+	}
+	return fitStyled(h.View(keys), width, roleStyle(footer))
 }
 
 func (m *model) styledLine(value string, width int, style lipgloss.Style) string {
 	return style.Render(fit(value, width))
+}
+
+// fitStyled clips to width and pads with styled blanks, so a themed background
+// reaches the end of the row even though the content arrives pre-styled and
+// cannot be wrapped in one enclosing style.
+func fitStyled(value string, width int, style lipgloss.Style) string {
+	if width <= 0 {
+		return ""
+	}
+	value = lipgloss.NewStyle().MaxWidth(width).Render(value)
+	if pad := width - lipgloss.Width(value); pad > 0 {
+		value += style.Render(strings.Repeat(" ", pad))
+	}
+	return value
 }
 
 func fit(value string, width int) string {
