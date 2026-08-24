@@ -418,11 +418,13 @@ Search-edit mode applies the search role to both the outer border and search pro
 
 **[REWRITE ADDITION]** Render confirmation and password dialogs as bordered Lip Gloss layers centered over the complete base screen. The base screen remains visible underneath. The modal layer has a higher Z value and receives all ordinary input.
 
-The confirmation dialog contains exactly:
+The ordinary confirmation dialog contains exactly:
 
 - Title: `Confirm uninstall`
 - Body: `Uninstall <snapshot-name>?`
 - Help: `y: confirm  other: cancel`
+
+For uninstalling the `lazybrew` cask itself, replace the body with `This removes lazybrew itself; the app will exit when done`.
 
 The password dialog contains:
 
@@ -581,8 +583,9 @@ The starting-uninstall state is committed and renderable before the returned com
 - On uninstall command failure, complete the bounded cleanup contract, then show the command error as priority status. Keep the existing list; do not report success. A cleanup failure instead reports `Uninstall cleanup failed: <error>`.
 - On password cancellation, authentication timeout, terminal safety cancellation, or global interruption, complete bounded cleanup before reporting the outcome. User cancellation reports `Uninstall cancelled`; authentication/protocol rejection reports `Administrator authentication failed`; timeout reports `Administrator authentication timed out`. A cleanup failure takes precedence and reports `Uninstall cleanup failed: <error>`.
 - On uninstall command success, do not yet show success. Enter the exact post-uninstall reload state in section 8. If reload succeeds, set `Uninstalled <snapshot-name>`, clamp selection/offset, and schedule fresh selected-package info. If reload fails, show the reload error and do not show `Uninstalled`. A cleanup failure can never be reported as success.
+- On successful uninstall of the `lazybrew` cask itself, cleanly quit instead of reloading the inventory.
 
-**[CURRENT/PARITY]** Success is observable only after both `brew uninstall` and the active list reload succeed.
+**[CURRENT/PARITY]** Except for the self-uninstall exit above, success is observable only after both `brew uninstall` and the active list reload succeed.
 
 ## 9A. Upgrade
 

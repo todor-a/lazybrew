@@ -697,6 +697,10 @@ func queuedStatus(op brew.Operation, name string) string {
 	return "Queued " + words(op).lower + " " + name
 }
 
+func isSelfUninstall(op brew.Operation, pkg brew.Package) bool {
+	return op == brew.Uninstall && pkg.Kind == brew.Cask && pkg.Name == "lazybrew"
+}
+
 func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	switch key.String() {
 	case "up", "k":
@@ -1198,6 +1202,9 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 	case result.Err != nil:
 		m.finishOperation(flattenStatus(result.Err.Error()))
 	default:
+		if m.operation != nil && isSelfUninstall(m.verb, *m.operation) {
+			return m.beginQuit(0)
+		}
 		// One invalidate+reload for the whole run, when the queue drains: each
 		// pop starts the next job directly, so the list stays browse-only and
 		// deliberately stale mid-queue - the same contract a single job's
