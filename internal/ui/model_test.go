@@ -1316,6 +1316,116 @@ func visibleNames(m *model) []string {
 	return names
 }
 
+// f writes is:outdated into the query - visible state, and the key itself
+// teaches the syntax the search footer names.
+func TestQuickFilterTogglesOutdatedQualifier(t *testing.T) {
+	homebrew := diskFleet()
+	homebrew.outdated = map[brew.Kind][]brew.OutdatedPackage{
+		brew.Cask: {{Name: "Beta", Installed: "1.0", Latest: "2.0"}},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	m.updateNormal(textKey("f"))
+	if m.query != "is:outdated" {
+		t.Fatalf("query=%q, want the written token", m.query)
+	}
+	if m.status != "Filter: outdated" || m.priority {
+		t.Fatalf("status=%q priority=%v, want an ordinary Filter: outdated", m.status, m.priority)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"Beta"}) {
+		t.Fatalf("filtered rows=%q, want only the outdated cask", got)
+	}
+
+	m.updateNormal(textKey("F"))
+	if m.query != "" {
+		t.Fatalf("query=%q, want the token removed", m.query)
+	}
+	if m.status != "Filter: outdated off" {
+		t.Fatalf("status=%q, want Filter: outdated off", m.status)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"Alpha", "Beta"}) {
+		t.Fatalf("restored rows=%q, want the full list back", got)
+	}
+}
+
+// Typed qualifiers compose with each other and with the a-written token, and
+// take effect on every keystroke exactly as substring search does.
+func TestTypedQualifiersComposeInSearch(t *testing.T) {
+	homebrew := diskFleet()
+	homebrew.outdated = map[brew.Kind][]brew.OutdatedPackage{
+		brew.Formula: {{Name: "gcc", Installed: "1", Latest: "2"}, {Name: "vault", Installed: "1", Latest: "2"}},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+	drainList(t, m, m.switchKind())
+
+	m.updateNormal(textKey("/"))
+	for _, r := range "is:outdated" {
+		m.Update(textKey(string(r)))
+	}
+	// gcc is outdated but a hidden dependency; the qualifier narrows within
+	// the dependency rule, it does not override it.
+	if got := visibleNames(m); !slices.Equal(got, []string{"vault"}) {
+		t.Fatalf("is:outdated rows=%q, want the outdated on-request formula", got)
+	}
+	for _, r := range " is:dep" {
+		m.Update(textKey(string(r)))
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"gcc", "vault"}) {
+		t.Fatalf("is:outdated is:dep rows=%q, want outdated deps revealed", got)
+	}
+}
+
+// esc clears the whole query, qualifiers included: the query is the only
+// filter state, so "clear the search" and "clear the filters" are one act.
+func TestEscapeClearsQualifiersToo(t *testing.T) {
+	m, _ := newFleetModel(t)
+	drainList(t, m, m.switchKind())
+	m.updateNormal(textKey("a"))
+	if got := len(visibleNames(m)); got != 4 {
+		t.Fatalf("%d rows after a, want dependencies revealed", got)
+	}
+	m.updateNormal(textKey("/"))
+	m.Update(specialKey(tea.KeyEscape))
+	if m.query != "" {
+		t.Fatalf("query=%q, want cleared", m.query)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "vault"}) {
+		t.Fatalf("rows after esc=%q, want the dependency hide restored", got)
+	}
+}
+
+// The count line reports predicate narrowing, and is:dep grows the base so
+// lifting the hide never reads as "4 of 2 match".
+func TestInstalledCountTracksQualifiers(t *testing.T) {
+	homebrew := diskFleet()
+	homebrew.outdated = map[brew.Kind][]brew.OutdatedPackage{
+		brew.Formula: {{Name: "vault", Installed: "1", Latest: "2"}},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+	drainList(t, m, m.switchKind())
+
+	if got := m.installedStatus(); got != "2 formulae installed" {
+		t.Fatalf("unfiltered count=%q", got)
+	}
+	m.updateNormal(textKey("f"))
+	if got := m.installedStatus(); got != "1 of 2 formulae match" {
+		t.Fatalf("filtered count=%q, want the narrowed count", got)
+	}
+	m.updateNormal(textKey("a"))
+	if got := m.installedStatus(); got != "1 of 4 formulae match" {
+		t.Fatalf("count with deps revealed=%q, want the grown base", got)
+	}
+}
+
 func TestDependencyToggleServesRetentionAndStartsNoCommand(t *testing.T) {
 	m, homebrew := newFleetModel(t)
 	drainList(t, m, m.switchKind())
@@ -1325,13 +1435,17 @@ func TestDependencyToggleServesRetentionAndStartsNoCommand(t *testing.T) {
 	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "vault"}) {
 		t.Fatalf("startup formula rows=%q, want dependencies hidden", got)
 	}
-	if m.showDeps {
+	if parseQuery(m.query).showDeps {
 		t.Fatal("dependencies were shown at startup")
 	}
 	listCalls := homebrew.listCalls[brew.Formula]
 
 	m.list.Select(1)
 	m.updateNormal(textKey("a"))
+	// The key writes its query spelling, so the state is one string.
+	if m.query != "is:dep" {
+		t.Fatalf("query=%q, want is:dep written by the key", m.query)
+	}
 	// Revealing rows resets the selection, so info retargets the new row 0.
 	if got := m.selectedPackage(); got == nil || got.Name != "awscli" {
 		t.Fatalf("selection after d=%#v, want the reset row 0", got)
@@ -1674,8 +1788,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			if m.query != pressed {
 				t.Fatalf("query=%q, want the key typed as text", m.query)
 			}
-			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
-				t.Fatalf("search mode applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
+			if parseQuery(m.query).showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("search mode applied the key: deps=%v sort=%v", parseQuery(m.query).showDeps, m.sortOrders[m.kind])
 			}
 		})
 
@@ -1686,8 +1800,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			if m.mode != modeNormal || m.status != "Uninstall cancelled" {
 				t.Fatalf("mode=%v status=%q, want a cancelled confirmation", m.mode, m.status)
 			}
-			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
-				t.Fatalf("confirmation applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
+			if parseQuery(m.query).showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("confirmation applied the key: deps=%v sort=%v", parseQuery(m.query).showDeps, m.sortOrders[m.kind])
 			}
 		})
 
@@ -1696,8 +1810,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			m.loading = true
 			m.loadPurpose = loadRefresh
 			m.Update(textKey(pressed))
-			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
-				t.Fatalf("a loading list applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
+			if parseQuery(m.query).showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("a loading list applied the key: deps=%v sort=%v", parseQuery(m.query).showDeps, m.sortOrders[m.kind])
 			}
 		})
 
@@ -1705,8 +1819,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			m, _ := newFleetModel(t)
 			m.mode = modeQuitting
 			m.Update(textKey(pressed))
-			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
-				t.Fatalf("quitting applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
+			if parseQuery(m.query).showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("quitting applied the key: deps=%v sort=%v", parseQuery(m.query).showDeps, m.sortOrders[m.kind])
 			}
 		})
 	}

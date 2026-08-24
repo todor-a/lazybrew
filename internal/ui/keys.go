@@ -28,6 +28,7 @@ var (
 		key.NewBinding(key.WithKeys("d", "D"), key.WithHelp("Uninstall:", "d")),
 		key.NewBinding(key.WithKeys("u", "U"), key.WithHelp("Upgrade:", "u")),
 		key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("All:", "a")),
+		key.NewBinding(key.WithKeys("f", "F"), key.WithHelp("Filter:", "f")),
 		key.NewBinding(key.WithKeys("o", "O"), key.WithHelp("Sort:", "o")),
 		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("Theme:", "t")),
 		key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("Refresh:", "r")),
@@ -39,6 +40,18 @@ var (
 	}
 	loadingHelp = footerKeys{
 		key.NewBinding(key.WithKeys("q", "Q"), key.WithHelp("Quit:", "q")),
+	}
+
+	// searchHelp trades the browse verbs for the search vocabulary: the mode
+	// owns every printable key, so the only teachable things are the
+	// qualifiers and the two ways out. This row is the ambient discoverability
+	// surface behind `f` writing its token into the query; when the qualifier
+	// list outgrows one row, that is the cue for a real help overlay — not a
+	// longer row.
+	searchHelp = footerKeys{
+		key.NewBinding(key.WithKeys("__filters_help__"), key.WithHelp("Filters:", "is:outdated · is:untrusted · is:dep")),
+		key.NewBinding(key.WithKeys("enter"), key.WithHelp("Keep:", "enter")),
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("Clear:", "esc")),
 	}
 
 	cleanupHelp = footerKeys{
