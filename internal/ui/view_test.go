@@ -454,12 +454,26 @@ func TestOutdatedGlyphIsOneCell(t *testing.T) {
 	}
 }
 
+// The search footer is the ambient discoverability surface for the filter
+// vocabulary; one row, per the issue-#31 plan.
+func TestSearchFooterTeachesTheFilterVocabulary(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	m.Update(textKey("/"))
+	lines := strippedLines(m)
+	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "\u2502"), " ")
+	want := "Filters: is:outdated \u00b7 is:untrusted \u00b7 is:dep \u00b7 Keep: enter \u00b7 Clear: esc"
+	if footer != want {
+		t.Fatalf("search footer=%q, want %q", footer, want)
+	}
+}
+
 func TestFooterListsEveryNormalKey(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Sort: o · Theme: t · Refresh: r · Quit: q"
+	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Filter: f · Sort: o · Theme: t · Refresh: r · Quit: q"
 	if footer != want {
 		t.Fatalf("footer=%q, want %q", footer, want)
 	}

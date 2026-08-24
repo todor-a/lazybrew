@@ -383,7 +383,6 @@ type model struct {
 	sizesID      uint64
 	sizesCancel  context.CancelFunc
 	sizesPending bool
-	showDeps     bool
 	sortOrders   map[brew.Kind]sortOrder
 
 	status       string
@@ -728,17 +727,33 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
 		saveSettings(m.settingsPath, settings{Theme: themes[m.themeIndex].name})
 	case "a", "A":
-		m.showDeps = !m.showDeps
-		// Casks have no dependency relation, so only the status changes there. The
-		// flag still flips, so the key is never silently dead and a later `tab`
-		// lands in the requested state.
+		// The key edits the query's is:dep token: the query is the ONLY
+		// filter state, so the key and a typed search can never disagree —
+		// and esc, which clears the query, clears this too, by the same rule.
+		// Casks have no dependency relation, so only the status changes
+		// there. The token still toggles, so the key is never silently dead
+		// and a later `tab` lands in the requested state.
+		var shown bool
+		m.query, shown = toggleQualifier(m.query, "is:dep")
 		if m.kind != brew.Formula {
-			m.status, m.priority = dependencyStatus(m.showDeps), false
+			m.status, m.priority = dependencyStatus(shown), false
 			return nil
 		}
 		cmd, applied := m.reorder()
 		if applied {
-			m.status, m.priority = dependencyStatus(m.showDeps), false
+			m.status, m.priority = dependencyStatus(shown), false
+		}
+		return cmd
+	case "f", "F":
+		// The quick filter writes the query it stands for — is:outdated, at
+		// the front of the search row — so one use teaches the syntax the
+		// search footer names. It edits the query rather than a flag for the
+		// same reason `a` does: one filter state, no second opinion.
+		var on bool
+		m.query, on = toggleQualifier(m.query, "is:outdated")
+		cmd, applied := m.reorder()
+		if applied {
+			m.status, m.priority = filterStatus(on), false
 		}
 		return cmd
 	case "o", "O":
@@ -870,7 +885,7 @@ func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
 		return m.switchKind()
 	case "esc":
 		m.query = ""
-		m.applyFilter(0)
+		m.applyQuery(0)
 		m.mode = modeNormal
 		return m.selectInfo()
 	case "backspace", "ctrl+h":
@@ -879,14 +894,14 @@ func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
 		}
 		runes := []rune(m.query)
 		m.query = string(runes[:len(runes)-1])
-		m.applyFilter(0)
+		m.applyQuery(0)
 		return m.selectInfo()
 	case "delete":
 		return nil
 	}
 	if text := key.Key().Text; text != "" {
 		m.query += text
-		m.applyFilter(0)
+		m.applyQuery(0)
 		return m.selectInfo()
 	}
 	return nil
@@ -1461,9 +1476,17 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 // sorting, because listCache shares the backing array and sorting in place would
 // corrupt retention and make `d` non-idempotent.
 func (m *model) setPackages(packages []brew.Package, selection int) {
+	parsed := parseQuery(m.query)
 	visible := make([]brew.Package, 0, len(packages))
 	for _, pkg := range packages {
-		if pkg.Dependency && !m.showDeps {
+		// The dependency rule and the is: predicates live here together, next
+		// to the sort, so no caller can disagree about what the list holds.
+		// The dependency default (hidden) is lifted by is:dep — the query
+		// spelling of `a` — rather than narrowed by it; see parseQuery.
+		if pkg.Dependency && !parsed.showDeps {
+			continue
+		}
+		if !parsed.match(pkg) {
 			continue
 		}
 		visible = append(visible, pkg)
@@ -1499,7 +1522,7 @@ func (m *model) setPackages(packages []brew.Package, selection int) {
 		items[i] = packageItem{packageValue: pkg}
 	}
 	m.list.SetItems(items)
-	m.list.SetFilterText(m.query)
+	m.list.SetFilterText(parsed.text)
 	m.clampSelection(selection)
 }
 
@@ -1509,6 +1532,16 @@ func (m *model) setPackages(packages []brew.Package, selection int) {
 // whether it had a list to re-render. With none - after a failed load - the
 // caller must not replace whatever the status already says, which is typically
 // the load error, with a claim about an order the user cannot see.
+// filterStatus reports what `f` just did to its own token, not the whole
+// query: other qualifiers may remain, and the search row is the display for
+// the full filter state.
+func filterStatus(on bool) string {
+	if on {
+		return "Filter: outdated"
+	}
+	return "Filter: outdated off"
+}
+
 func dependencyStatus(shown bool) string {
 	if shown {
 		return "Dependencies: shown"
@@ -1578,8 +1611,21 @@ func (m *model) reorder() (tea.Cmd, bool) {
 }
 
 func (m *model) applyFilter(selection int) {
-	m.list.SetFilterText(m.query)
+	m.list.SetFilterText(parseQuery(m.query).text)
 	m.clampSelection(selection)
+}
+
+// applyQuery re-derives the visible rows after a query change. The is:
+// predicates and the dependency rule live in setPackages, so the rebuild runs
+// from the retained list; with nothing retained — a failed load — only the
+// substring filter can apply, and the next successful load re-runs
+// setPackages anyway.
+func (m *model) applyQuery(selection int) {
+	if cached, ok := m.listCache[m.kind]; ok {
+		m.setPackages(cached, selection)
+		return
+	}
+	m.applyFilter(selection)
 }
 
 func (m *model) clampSelection(selection int) {
@@ -1742,18 +1788,35 @@ func otherKind(kind brew.Kind) brew.Kind {
 // an empty list; the list pane's own empty state already says that, and a
 // failed load would otherwise read as "0 installed".
 func (m *model) installedStatus() string {
-	total := len(m.list.Items())
-	if total == 0 {
+	// The base is what the current dependency visibility would show with no
+	// narrowing at all, so is:dep never yields "304 of 296": lifting the hide
+	// grows the base, while predicates and text only shrink the shown count
+	// within it.
+	parsed := parseQuery(m.query)
+	base := 0
+	for _, pkg := range m.listCache[m.kind] {
+		if pkg.Dependency && !parsed.showDeps {
+			continue
+		}
+		base++
+	}
+	if base == 0 {
+		return ""
+	}
+	// A cleared list — failed load, empty inventory — shows no count at all,
+	// unless the query itself emptied it, where "0 of N match" is the honest
+	// answer to what the user typed.
+	if len(m.list.Items()) == 0 && !parsed.narrowing() {
 		return ""
 	}
 	noun := "casks"
 	if m.kind == brew.Formula {
 		noun = "formulae"
 	}
-	if shown := len(m.list.VisibleItems()); shown != total {
-		return strconv.Itoa(shown) + " of " + strconv.Itoa(total) + " " + noun + " match"
+	if shown := len(m.list.VisibleItems()); shown != base {
+		return strconv.Itoa(shown) + " of " + strconv.Itoa(base) + " " + noun + " match"
 	}
-	return strconv.Itoa(total) + " " + noun + " installed"
+	return strconv.Itoa(base) + " " + noun + " installed"
 }
 
 func flattenStatus(value string) string {

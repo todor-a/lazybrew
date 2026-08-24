@@ -602,6 +602,8 @@ func (m *model) footerLine(width int) string {
 		keys = progressHelp(m.verb)
 	case m.loading:
 		keys = loadingHelp
+	case m.mode == modeSearch:
+		keys = searchHelp
 	case m.mode == modeConfirm:
 		keys = confirmHelp
 	case m.mode == modePassword:
