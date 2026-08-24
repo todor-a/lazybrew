@@ -78,6 +78,26 @@ static int lb_proc_argv(pid_t pid, char *out, size_t out_cap) {
 	return (int)used;
 }
 
+// lb_proc_restricted reads what the kernel still publishes about a process
+// whose euid differs from the caller's: KERN_PROC_PID (ppid, pgid, euid,
+// ruid) is world-readable, and proc_pidpath works cross-euid, while
+// proc_pidinfo(PROC_PIDTBSDINFO) returns EPERM and KERN_PROCARGS2 returns
+// EINVAL (probed against a live setuid /usr/bin/sudo on macOS 25.6).
+static int lb_proc_restricted(pid_t pid, pid_t *ppid, pid_t *pgid, unsigned int *euid, unsigned int *ruid, char *path, int path_cap) {
+	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+	struct kinfo_proc info;
+	size_t size = sizeof(info);
+	memset(&info, 0, sizeof(info));
+	if (sysctl(mib, 4, &info, &size, NULL, 0) != 0 || size == 0 || info.kp_proc.p_pid != pid) return -1;
+	int path_len = proc_pidpath(pid, path, path_cap);
+	if (path_len <= 0 || path_len >= path_cap) return -1;
+	*ppid = info.kp_eproc.e_ppid;
+	*pgid = info.kp_eproc.e_pgid;
+	*euid = info.kp_eproc.e_ucred.cr_uid;
+	*ruid = info.kp_eproc.e_pcred.p_ruid;
+	return path_len;
+}
+
 static int lb_process_group_has_live_members(pid_t pgid, int *has_live) {
 	if (pgid <= 1 || has_live == NULL) {
 		errno = EINVAL;
@@ -192,6 +212,12 @@ type processEvidence struct {
 	GroupID    int
 	LoadedPath string
 	Argv       []string
+	// Restricted marks a node acquired through the kinfo fallback: a
+	// setuid-root process (euid 0, real uid ours) whose proc_pidinfo and
+	// argv the kernel refuses to a non-root caller. Its lineage, process
+	// group, and executable path are still kernel-reported truth; only its
+	// argv is unknowable. Settable exclusively by acquireRestrictedProcess.
+	Restricted bool
 }
 
 type peerEvidence struct {
@@ -301,7 +327,7 @@ func acquirePeerEvidence(conn *net.UnixConn, trackedPID, trackedGroupID int, exp
 	return evidence, errors.New("process ancestry exceeds limit")
 }
 func sameProcessEvidence(left, right processEvidence, compareArgv bool) bool {
-	if left.PID != right.PID || left.ParentPID != right.ParentPID || left.GroupID != right.GroupID || left.LoadedPath != right.LoadedPath {
+	if left.PID != right.PID || left.ParentPID != right.ParentPID || left.GroupID != right.GroupID || left.LoadedPath != right.LoadedPath || left.Restricted != right.Restricted {
 		return false
 	}
 	if !compareArgv {
@@ -345,7 +371,19 @@ func verifyPeerEvidence(e peerEvidence) error {
 		return errAuthentication
 	}
 	sudo := e.Chain[1]
-	if sudo.LoadedPath != "/usr/bin/sudo" || !containsArgument(sudo.Argv, "-A") {
+	if sudo.LoadedPath != "/usr/bin/sudo" {
+		return errAuthentication
+	}
+	// The -A check proved sudo was invoked in askpass mode. For a Restricted
+	// sudo the kernel refuses argv to non-root callers, so the check cannot
+	// run - and it was corroboration, not the load-bearing bind: a sudo
+	// without -A never execs an askpass at all, so the verified peer's
+	// existence (this binary, exec'd via this job's private SUDO_ASKPASS
+	// link, child of this sudo) already implies askpass mode. The password
+	// stays bound to the job's process tree by everything that remains:
+	// kernel-reported path /usr/bin/sudo, pgid membership in the tracked
+	// group, and lineage terminating at the tracked brew child.
+	if !sudo.Restricted && !containsArgument(sudo.Argv, "-A") {
 		return errAuthentication
 	}
 	if e.Chain[0].GroupID != e.TrackedGroupID || sudo.GroupID != e.TrackedGroupID {
@@ -358,6 +396,13 @@ func verifyPeerEvidence(e peerEvidence) error {
 			return errAuthentication
 		}
 		if _, exists := seen[proc.PID]; exists {
+			return errAuthentication
+		}
+		// Only the sudo link may be euid-restricted: the peer shares our
+		// euid by the socket-credential check, and everything above sudo is
+		// brew's own user-euid tree, so a second unreadable link is not a
+		// legitimate shape.
+		if proc.Restricted && index != 1 {
 			return errAuthentication
 		}
 		seen[proc.PID] = struct{}{}
@@ -404,7 +449,14 @@ func acquireProcess(pid int, withArgv bool) (processEvidence, error) {
 	var pgid C.pid_t
 	n := int(C.lb_proc_info(C.pid_t(pid), &ppid, &pgid, (*C.char)(unsafe.Pointer(&path[0])), C.int(len(path))))
 	if n <= 0 || n > len(path) {
-		return processEvidence{}, errors.New("process information unavailable")
+		// proc_pidinfo is euid-gated: it returns EPERM against the setuid
+		// /usr/bin/sudo that necessarily sits between the askpass helper and
+		// the job's brew child, which made every real brew-invoked sudo fail
+		// verification (field log: "process information unavailable"). The
+		// kinfo fallback recovers exactly the fields the walk and the
+		// verifier need - ppid, pgid, path - from kernel-published data, and
+		// only for the one process shape that cannot be read the normal way.
+		return acquireRestrictedProcess(pid)
 	}
 	result := processEvidence{PID: pid, ParentPID: int(ppid), GroupID: int(pgid), LoadedPath: string(path[:n])}
 	if withArgv {
@@ -421,6 +473,40 @@ func acquireProcess(pid int, withArgv bool) (processEvidence, error) {
 		}
 	}
 	return result, nil
+}
+
+// acquireRestrictedProcess is the euid-gated fallback for acquireProcess.
+// It accepts only the setuid-sudo shape: kernel-reported euid 0 with the
+// caller's own real uid, i.e. a setuid-root binary this user launched.
+// Anything else keeps failing exactly as before - the fallback must never
+// widen acquisition for ordinary same-euid processes, whose primary reads
+// cannot legitimately fail. Argv is unreadable for such a node
+// (KERN_PROCARGS2 returns EINVAL cross-euid), so the node carries none and
+// is marked Restricted; the verifier decides what that absence may excuse.
+func acquireRestrictedProcess(pid int) (processEvidence, error) {
+	path := make([]byte, C.PROC_PIDPATHINFO_MAXSIZE)
+	var ppid C.pid_t
+	var pgid C.pid_t
+	var euid C.uint
+	var ruid C.uint
+	n := int(C.lb_proc_restricted(C.pid_t(pid), &ppid, &pgid, &euid, &ruid, (*C.char)(unsafe.Pointer(&path[0])), C.int(len(path))))
+	if n <= 0 || n > len(path) {
+		return processEvidence{}, errors.New("process information unavailable")
+	}
+	if !restrictedAcquisitionAllowed(int(euid), int(ruid), os.Getuid()) {
+		return processEvidence{}, errors.New("process information unavailable")
+	}
+	return processEvidence{
+		PID: pid, ParentPID: int(ppid), GroupID: int(pgid),
+		LoadedPath: string(path[:n]), Restricted: true,
+	}, nil
+}
+
+// restrictedAcquisitionAllowed pins the narrowest predicate for the fallback:
+// the target runs with root effective uid on top of the caller's real uid -
+// the shape of a setuid system sudo the caller's own tree launched.
+func restrictedAcquisitionAllowed(euid, ruid, selfUID int) bool {
+	return euid == 0 && ruid == selfUID
 }
 
 func containsArgument(argv []string, target string) bool {

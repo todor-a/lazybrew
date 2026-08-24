@@ -19,6 +19,7 @@ Runs the two mutating brew verbs with administrator authentication kept OUT of t
 - Passwords: never logged, never cached, wiped after use; any change touching password bytes needs explicit review of every copy made.
 - The helper re-entry (`RunHelperFromEnv`) is invoked from cmd/lazybrew before anything else. Detection is path-first: brew scrubs the LAZYBREW_* env markers, so SUDO_ASKPASS points at a per-job `lazybrew-askpass` symlink inside the private socket directory and the helper recognises itself by argv[0]; the env route survives for direct (unscrubbed) children and tests.
 - One job at a time is a UI-level AND runner-level invariant; the ui queue serializes on top, it does not parallelize.
+- Peer-chain walking cannot read setuid sudo the normal way: proc_pidinfo returns EPERM and KERN_PROCARGS2 EINVAL cross-euid, so the sudo link is acquired via the world-readable KERN_PROC_PID fallback (`acquireRestrictedProcess`) and its `-A` argv check is excused — only for a node kinfo proves is euid-0 on our own real uid, only at chain index 1. Do not widen either condition.
 - Cleanup runs under a deadline (main gives 20s); phases must stay bounded.
 
 ### Testing Requirements
