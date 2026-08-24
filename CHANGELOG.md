@@ -6,6 +6,7 @@
 ### Features
 
 * mark outdated packages from brew outdated ([#4](https://github.com/todor-a/lazybrew/issues/4)) ([755943d](https://github.com/todor-a/lazybrew/commit/755943d65aa015647a4540295206f29fe59e870a))
+* show the whole fleet with sizes, dependency origin, and a size sort ([#5](https://github.com/todor-a/lazybrew/pull/5)) ([755943d](https://github.com/todor-a/lazybrew/commit/755943d65aa015647a4540295206f29fe59e870a))
 
 
 ### Build and release
