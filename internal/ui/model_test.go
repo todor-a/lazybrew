@@ -440,7 +440,9 @@ func TestJobWindowAllowsBrowsingAndBlocksMutation(t *testing.T) {
 		t.Fatal("theme cycle dead during job")
 	}
 
-	for _, key := range []tea.KeyPressMsg{textKey("d"), textKey("u"), textKey("r"), textKey("tab"), textKey("/"), textKey("s"), textKey("q")} {
+	// d and u are no longer dead here - they open the enqueue dialog, covered
+	// by the queue tests below - so only the truly dead keys stay in this loop.
+	for _, key := range []tea.KeyPressMsg{textKey("r"), textKey("tab"), textKey("/"), textKey("s"), textKey("q")} {
 		m.Update(key)
 	}
 	if m.mode != modeOperation || m.confirmation != nil || m.loading || m.kind != brew.Cask || uninstaller.starts != 1 {
@@ -460,6 +462,121 @@ func TestJobWindowAllowsBrowsingAndBlocksMutation(t *testing.T) {
 	other := m.packageLine(brew.Package{Name: "Beta", Version: "2.0", Kind: brew.Cask}, false, 60)
 	if strings.Contains(other, m.spinner.View()) {
 		t.Fatalf("unrelated row %q carries the operation mark", other)
+	}
+	uninstaller.job.Cancel()
+}
+
+// A second confirmed operation queues while a job runs and starts the moment
+// the running job succeeds. The reload happens exactly once, when the queue
+// drains, and the queue is visible in the row marker and the info pane block.
+func TestOperationsQueueAndRunSerially(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	homebrew := m.homebrew.(*fakeHomebrew)
+	startFakeUninstall(t, m, uninstaller)
+
+	m.Update(textKey("j"))
+	m.Update(textKey("d"))
+	if m.mode != modeConfirm {
+		t.Fatalf("mode=%v, want a confirmation over the running job", m.mode)
+	}
+	m.Update(textKey("y"))
+	if len(m.queue) != 1 || m.queue[0].pkg.Name != "Beta" || m.mode != modeOperation {
+		t.Fatalf("queue=%v mode=%v, want Beta queued under modeOperation", m.queue, m.mode)
+	}
+	if m.status != "Queued uninstall Beta" {
+		t.Fatalf("status=%q, want the queued receipt", m.status)
+	}
+
+	m.Update(textKey("d"))
+	if m.mode != modeOperation || len(m.queue) != 1 || m.status != "Beta already queued" {
+		t.Fatalf("duplicate not refused: mode=%v queue=%d status=%q", m.mode, len(m.queue), m.status)
+	}
+
+	row := m.packageLine(brew.Package{Name: "Beta", Version: "2.0", Kind: brew.Cask}, false, 60)
+	if !strings.Contains(row, "•") {
+		t.Fatalf("queued row %q missing the bullet mark", row)
+	}
+	pane := strings.Join(m.infoLines(40, 10), "\n")
+	for _, want := range []string{"Queue", "Uninstalling Alpha...", "queued · uninstall Beta"} {
+		if !strings.Contains(pane, want) {
+			t.Fatalf("info pane %q missing %q", pane, want)
+		}
+	}
+
+	listCallsBefore := homebrew.listCalls[brew.Cask]
+	uninstaller.job.finish(privileged.Result{})
+	uninstaller.job = newFakeJob()
+	_, cmd := m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+	for _, message := range immediateMessages(cmd) {
+		if started, ok := message.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+	if uninstaller.starts != 2 || m.operation == nil || m.operation.Name != "Beta" || len(m.queue) != 0 {
+		t.Fatalf("second job did not start: starts=%d operation=%v queue=%d", uninstaller.starts, m.operation, len(m.queue))
+	}
+	if m.status != "Uninstalling Beta..." || m.loading {
+		t.Fatalf("mid-queue state: status=%q loading=%v, want Beta's progress with no reload", m.status, m.loading)
+	}
+	if homebrew.listCalls[brew.Cask] != listCallsBefore {
+		t.Fatal("a reload ran between queued jobs")
+	}
+
+	uninstaller.job.finish(privileged.Result{})
+	_, cmd = m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+	drainList(t, m, cmd)
+	if m.mode != modeNormal || m.status != "Uninstalled Beta" {
+		t.Fatalf("drain state: mode=%v status=%q", m.mode, m.status)
+	}
+	if homebrew.listCalls[brew.Cask] != listCallsBefore+1 {
+		t.Fatalf("listCalls=%d, want exactly one drain reload", homebrew.listCalls[brew.Cask])
+	}
+	if pane := strings.Join(m.infoLines(40, 10), "\n"); strings.Contains(pane, "Queue") {
+		t.Fatalf("queue block survived the drain: %q", pane)
+	}
+}
+
+// A cancelled or failed job never lets queued work continue, and the status
+// names what was dropped rather than reading as work done.
+func TestQueueDropsWhenTheRunningJobFails(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	startFakeUninstall(t, m, uninstaller)
+	m.Update(textKey("j"))
+	m.Update(textKey("d"))
+	m.Update(textKey("y"))
+	if len(m.queue) != 1 {
+		t.Fatalf("queue=%d, want 1", len(m.queue))
+	}
+
+	result := privileged.Result{Cancelled: true}
+	uninstaller.job.finish(result)
+	m.Update(jobResultMsg{id: m.operationID, result: result})
+	if len(m.queue) != 0 || uninstaller.starts != 1 || m.mode != modeNormal {
+		t.Fatalf("queue survived a cancel: queue=%d starts=%d mode=%v", len(m.queue), uninstaller.starts, m.mode)
+	}
+	if m.status != "Uninstall cancelled · 1 queued dropped" {
+		t.Fatalf("status=%q, want the drop receipt", m.status)
+	}
+}
+
+// An auth prompt arriving while an enqueue dialog is open takes the window -
+// sudo's prompt is time-boxed - without cancelling the job; the pending
+// confirmation is dropped rather than silently enqueued.
+func TestPasswordRequestHijacksAnOpenConfirmation(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	startFakeUninstall(t, m, uninstaller)
+	m.Update(textKey("j"))
+	m.Update(textKey("d"))
+	if m.mode != modeConfirm {
+		t.Fatalf("mode=%v, want confirm", m.mode)
+	}
+
+	m.Update(jobEventMsg{id: m.operationID, event: privileged.Event{Type: privileged.PasswordRequested, RequestID: privileged.RequestID{7}}, open: true})
+	if m.mode != modePassword || m.confirmation != nil {
+		t.Fatalf("hijack failed: mode=%v confirmation=%v", m.mode, m.confirmation != nil)
+	}
+	if len(uninstaller.job.result) > 0 {
+		t.Fatal("the hijack cancelled the running job")
 	}
 	uninstaller.job.Cancel()
 }
@@ -1771,8 +1888,8 @@ func TestBothVerbsShareTheConfirmationPathAndCarryTheirOwnWords(t *testing.T) {
 			if m.mode != modeConfirm || m.confirmation == nil {
 				t.Fatalf("no confirmation opened: mode=%v snapshot=%v", m.mode, m.confirmation)
 			}
-			if m.verb != tt.op {
-				t.Fatalf("verb=%v, want %v", m.verb, tt.op)
+			if m.confirmVerb != tt.op {
+				t.Fatalf("confirmVerb=%v, want %v", m.confirmVerb, tt.op)
 			}
 			if m.status != tt.title {
 				t.Fatalf("status=%q, want %q", m.status, tt.title)

@@ -395,11 +395,17 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if pkg.Untrusted {
 		freshness = "!"
 	}
+	// A queued row carries a bullet until its turn comes: confirmed work the
+	// user cannot see waiting would look like work forgotten. Same shared
+	// cell, same ponytail ceiling as above.
+	if m.isQueued(pkg) {
+		freshness = "•"
+	}
 	// The acted-upon row carries the operation's spinner in the freshness cell
 	// for as long as the job runs, so a user browsing elsewhere still sees which
 	// row the verb is acting on. The cell is reused rather than added: the mark
-	// displaces the outdated arrow — and the untrusted mark — on that one row
-	// only, and the layout cannot shift when the job ends.
+	// displaces the outdated arrow — and the untrusted and queued marks — on
+	// that one row only, and the layout cannot shift when the job ends.
 	if m.operation != nil && m.operation.Kind == pkg.Kind && m.operation.Name == pkg.Name {
 		freshness = m.spinner.View()
 	}
@@ -470,7 +476,39 @@ func (m *model) infoLines(width, height int) []string {
 			lines[row] = strings.Repeat(" ", width)
 		}
 	}
+	m.overlayQueue(lines, width, height)
 	return lines
+}
+
+// overlayQueue claims the info pane's bottom rows while a job runs: the
+// running entry first, then the queue in run order, so the whole run is
+// readable in one place while the status row only ever shows the latest event.
+//
+// ponytail: the block overwrites the pane's tail - the info text keeps
+// rendering at full height underneath and its last rows are hidden while the
+// block is up. Fine for a transient window; shortening the viewport for the
+// block's lifetime is the upgrade if the hidden tail ever matters.
+func (m *model) overlayQueue(lines []string, width, height int) {
+	if m.operation == nil || height < 4 {
+		return
+	}
+	rows := []string{"Queue", m.spinner.View() + " " + words(m.verb).gerund + " " + m.operation.Name + "..."}
+	for _, entry := range m.queue {
+		rows = append(rows, "queued · "+words(entry.verb).lower+" "+entry.pkg.Name)
+	}
+	// At most half the pane; the overflow row keeps the hidden count honest.
+	limit := max(2, height/2)
+	if len(rows) > limit {
+		hidden := len(rows) - (limit - 1)
+		rows = append(rows[:limit-1], "… +"+strconv.Itoa(hidden)+" more queued")
+	}
+	start := height - len(rows)
+	if start >= 2 {
+		lines[start-1] = strings.Repeat(" ", width)
+	}
+	for i, row := range rows {
+		lines[start+i] = fit(row, width)
+	}
 }
 
 func (m *model) statusLine() string {
@@ -592,7 +630,7 @@ func otherOperation(op brew.Operation) brew.Operation {
 }
 
 func (m *model) confirmationModal(pkg brew.Package) string {
-	return m.confirmationModalFor(m.verb, pkg)
+	return m.confirmationModalFor(m.confirmVerb, pkg)
 }
 
 func (m *model) confirmationModalFor(op brew.Operation, pkg brew.Package) string {
@@ -633,7 +671,7 @@ func (m *model) confirmationFits(pkg brew.Package) bool {
 	// Both modals: the fit check runs before the verb is chosen in the widest
 	// sense, and the wider of the two is what must fit.
 	confirmation := m.confirmationModal(pkg)
-	if other := m.confirmationModalFor(otherOperation(m.verb), pkg); lipgloss.Width(other) > lipgloss.Width(confirmation) {
+	if other := m.confirmationModalFor(otherOperation(m.confirmVerb), pkg); lipgloss.Width(other) > lipgloss.Width(confirmation) {
 		confirmation = other
 	}
 	passwordWidth := max(1, min(40, m.width-16))
