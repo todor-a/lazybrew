@@ -321,6 +321,14 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if pkg.Outdated {
 		freshness = "\u2191"
 	}
+	// The acted-upon row carries the operation's spinner in the freshness cell
+	// for as long as the job runs, so a user browsing elsewhere still sees which
+	// row the verb is acting on. The cell is reused rather than added: the mark
+	// displaces the outdated arrow on that one row only, and the layout cannot
+	// shift when the job ends.
+	if m.operation != nil && m.operation.Kind == pkg.Kind && m.operation.Name == pkg.Name {
+		freshness = m.spinner.View()
+	}
 	origin := originColumn(pkg)
 	// The size column is reserved only where a size can honestly be measured,
 	// which is the formula list. See rowSize.
@@ -443,8 +451,10 @@ func (m *model) footerLine(width int) string {
 		keys = loadingHelp
 	case m.mode == modeConfirm:
 		keys = confirmHelp
-	case m.mode == modeOperation || m.mode == modePassword:
+	case m.mode == modePassword:
 		keys = progressHelp(m.verb)
+	case m.mode == modeOperation:
+		keys = operationHelp(m.verb)
 	}
 	// Two-tone, and every segment carries the full footer role rather than relying
 	// on an enclosing style. A single outer Render over pre-styled segments would

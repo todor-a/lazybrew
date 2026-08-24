@@ -569,7 +569,10 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case modePassword:
 		return m, m.updatePassword(key)
 	case modeOperation:
-		return m, nil
+		// A running job acts only on its immutable snapshot, so the list stays
+		// browsable underneath it. updateNormal's jobRunning guards keep every
+		// mutating or mode-leaving key dead; see jobRunning for the boundary.
+		return m, m.updateNormal(key)
 	default:
 		return m, m.updateNormal(key)
 	}
@@ -607,6 +610,18 @@ func cleanupFailedStatus(op brew.Operation, err string) string {
 	return words(op).title + " cleanup failed: " + err
 }
 
+// jobRunning reports the window between a confirmed start and the moment the
+// job's ending reload lands, which is exactly when m.operation carries the
+// immutable snapshot. Browsing is safe in that window - the job reads nothing
+// from the list - but every key that could mutate the inventory, start a
+// second job, reload underneath the running one, or leave modeOperation is
+// dead. Leaving the mode matters as much as mutating: handleJobEvent cancels
+// the job on any event that arrives outside modeOperation, so entering search
+// mid-job would turn brew's password prompt into a cancelled operation. Dead
+// keys here follow the loading windows' precedent: silent, with the footer
+// naming the window browse-only.
+func (m *model) jobRunning() bool { return m.operation != nil }
+
 func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	switch key.String() {
 	case "up", "k":
@@ -622,6 +637,9 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 			return m.selectInfo()
 		}
 	case "/", "s", "S":
+		if m.jobRunning() {
+			return nil
+		}
 		m.mode = modeSearch
 	case "tab":
 		return m.switchKind()
@@ -655,10 +673,20 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		}
 		return cmd
 	case "r", "R":
+		// A reload here would race the invalidate-and-reload that ends the job,
+		// and the job's own completion refreshes everything anyway.
+		if m.jobRunning() {
+			return nil
+		}
 		selection := m.list.Index()
 		sizesCmd := m.invalidateCaches()
 		return tea.Batch(m.startList(loadRefresh, selection), sizesCmd, m.spinner.Tick)
 	case "q", "Q":
+		// ctrl+c stays the only quit while a job runs, exactly as it was when
+		// this window swallowed every key.
+		if m.jobRunning() {
+			return nil
+		}
 		return m.beginQuit(0)
 	}
 	return nil
@@ -676,6 +704,12 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 // snapshot, and the fit check are the security-relevant parts and must never be
 // re-derived per verb.
 func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
+	// One job at a time. The verb, snapshot, and cancel plumbing are all
+	// singular by design, so a second confirmation mid-job is dead rather than
+	// queued.
+	if m.jobRunning() {
+		return nil
+	}
 	selected := m.selectedPackage()
 	if selected == nil {
 		return nil
@@ -700,6 +734,12 @@ func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
 }
 
 func (m *model) switchKind() tea.Cmd {
+	// Dead while a job runs: the reload that ends the job targets m.kind, so a
+	// mid-job switch would land that reload on the other inventory and report
+	// the verb's result against a list it never touched.
+	if m.jobRunning() {
+		return nil
+	}
 	m.kind = otherKind(m.kind)
 	m.status, m.priority = "", false
 	m.info.Select(nil)
@@ -1166,9 +1206,10 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	// the pass landed. Preserving the selected package by name is the fix if that
 	// proves annoying.
 	//
-	// Only uninstall progress is excluded. That mode freezes the list by contract,
-	// and the reload that ends it calls setPackages, which re-applies the sort
-	// anyway. A confirmation or password dialog is a centered overlay over a list
+	// Only a running job is excluded. The list is browsable there, but the
+	// reload that ends the job calls setPackages, which re-applies the sort
+	// anyway, so re-ordering under a browsing cursor mid-job would move rows
+	// twice for nothing. A confirmation or password dialog is a centered overlay over a list
 	// the section 9 immutable snapshot already protects, so re-ordering underneath
 	// it changes nothing that matters - and skipping it there left the request
 	// dropped with no retry, so cancelling the dialog returned to a list in source
