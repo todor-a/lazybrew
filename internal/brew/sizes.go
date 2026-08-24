@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // duPath is the absolute base-system du rather than a PATH lookup. macOS-only is
@@ -15,7 +16,20 @@ import (
 // a process this package spawns.
 const duPath = "/usr/bin/du"
 
-var errMissingRoot = errors.New("Homebrew did not report its package root")
+var errMissingRoot = errors.New("Homebrew did not report a usable package root")
+
+// safeRootPath applies the section 3 argv rule to a path Homebrew printed.
+func safeRootPath(path string) bool {
+	if path == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	for _, r := range path {
+		if r == 0 || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // Sizes is one measurement of installed size, in KB, for every installed
 // formula, plus their total.
@@ -86,7 +100,12 @@ func (client) root(ctx context.Context, flag string) (string, error) {
 		return "", err
 	}
 	path := strings.TrimSpace(string(stdout))
-	if path == "" {
+	// The same rule section 3 applies to package names, applied here because this
+	// value also reaches an argv. A path beginning with "-" would be read by du as
+	// an option rather than an operand, and a control character has no business in
+	// a path Homebrew printed. It comes from brew rather than from the inventory,
+	// which is why it is checked rather than assumed.
+	if !safeRootPath(path) {
 		return "", errMissingRoot
 	}
 	return path, nil

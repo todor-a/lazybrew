@@ -1540,3 +1540,57 @@ func TestSearchMatchesTheRenderedOriginToken(t *testing.T) {
 		t.Fatalf("an on-request formula matched %q: %q", "dep", onRequest.FilterValue())
 	}
 }
+
+// A size measurement landing while a confirmation dialog is open must still be
+// applied. Skipping it dropped the request with no retry, so cancelling the
+// dialog returned to a list in source order while the status claimed a size sort.
+func TestASizeSortRequestSurvivesAConfirmationDialog(t *testing.T) {
+	m, homebrew := newFleetModel(t)
+	switchTo(t, m)
+
+	landed := *m.sizes
+	m.sizes = nil
+	m.Update(textKey("o"))
+	if !m.sortBySize {
+		t.Fatal("o did not request a size sort")
+	}
+
+	// Open the confirmation, then let the measurement land underneath it.
+	m.Update(textKey("u"))
+	if m.mode != modeConfirm {
+		t.Fatalf("mode=%v, want confirm", m.mode)
+	}
+	m.Update(sizesResultMsg{id: m.sizesID, sizes: landed})
+
+	// Cancel the dialog and read the order actually on screen.
+	m.Update(textKey("n"))
+	if m.mode != modeNormal {
+		t.Fatalf("mode=%v after cancel, want normal", m.mode)
+	}
+	names := visibleNames(m)
+	if len(names) < 2 {
+		t.Fatalf("only %d rows visible", len(names))
+	}
+	first, _ := homebrew.sizes.KB(brew.Formula, names[0])
+	second, _ := homebrew.sizes.KB(brew.Formula, names[1])
+	if first < second {
+		t.Fatalf("list is not sorted by size after the dialog: %q (%d then %d)", names[:2], first, second)
+	}
+}
+
+// With no retained list, a toggle must not replace a real status - typically the
+// load error - with a claim about an order the user cannot see.
+func TestAToggleWithNoRetainedListKeepsTheExistingStatus(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.setPackages(nil, 0)
+	delete(m.listCache, m.kind)
+	m.status, m.priority = "brew exploded", false
+
+	m.Update(textKey("o"))
+	if m.status != "brew exploded" {
+		t.Fatalf("status=%q, want the existing error preserved", m.status)
+	}
+	if !m.sortBySize {
+		t.Fatal("the preference should still be recorded for the next load")
+	}
+}

@@ -207,3 +207,27 @@ func TestSizesKBIgnoresAnInvalidKind(t *testing.T) {
 		t.Error("KB() reported a size for an unmeasured package")
 	}
 }
+
+// The root reaches du's argv, so it is held to the same rule section 3 applies to
+// package names. It comes from brew rather than from the inventory, which is why
+// it is checked rather than assumed.
+func TestSizesRejectsAnUnusableRoot(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		root string
+	}{
+		{"empty", "\n"},
+		{"relative", "Cellar\n"},
+		{"option-like", "-rf\n"},
+		{"control character", "/opt/home\x01brew/Cellar\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := configureFakeBrew(t, tt.root, "", 0, false)
+			if _, err := New().Sizes(context.Background()); err != errMissingRoot {
+				t.Fatalf("Sizes() error = %v, want %v", err, errMissingRoot)
+			}
+			// The root query ran; du did not.
+			assertRecordedArgs(t, argsFile, []string{"--cellar"})
+		})
+	}
+}
