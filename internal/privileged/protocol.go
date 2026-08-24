@@ -217,7 +217,24 @@ func helperExchange(socketPath string) ([]byte, error) {
 func RunHelperFromEnv() (handled bool, exitCode int) {
 	env := os.Environ()
 	if countKey(env, askpassModeKey) == 0 {
-		return false, 0
+		// brew's bin/brew sanitizes the environment of everything it runs:
+		// SUDO_ASKPASS survives its whitelist but the LAZYBREW_* markers do
+		// not, so when brew's own sudo execs this binary the environment
+		// carries no helper evidence at all. The invocation path is the one
+		// channel brew cannot strip — SUDO_ASKPASS names the per-job helper
+		// link and sudo passes that exact string through as argv[0].
+		socket, isHelper, valid := helperSocketFromInvocation(os.Args)
+		if !isHelper {
+			return false, 0
+		}
+		// A process running under the helper name is never a legitimate
+		// interactive run, so an invalid claim fails closed instead of
+		// falling through to normal startup and printing the TTY refusal
+		// into sudo's askpass pipe.
+		if setCoreLimit() != nil || !valid {
+			return true, 1
+		}
+		return true, helperExit(socket)
 	}
 	if setCoreLimit() != nil {
 		return true, 1
@@ -226,15 +243,71 @@ func RunHelperFromEnv() (handled bool, exitCode int) {
 	if !ok {
 		return true, 1
 	}
-	password, err := helperExchange(metadata.socket)
+	return true, helperExit(metadata.socket)
+}
+
+// helperExit is the shared helper tail — one exchange, one write, everything
+// wiped — so the two detection routes cannot drift apart.
+func helperExit(socketPath string) int {
+	password, err := helperExchange(socketPath)
 	if err != nil {
-		return true, 1
+		return 1
 	}
 	defer wipe(password)
 	if err := writeHelperOutput(helperOutput, password); err != nil {
-		return true, 1
+		return 1
 	}
-	return true, 0
+	return 0
+}
+
+// helperLinkName is the fixed basename of the per-job SUDO_ASKPASS symlink.
+// The name doubles as the helper-mode declaration: sudo passes the
+// SUDO_ASKPASS string through as argv[0], and no legitimate interactive run
+// of lazybrew is ever spelled this way.
+const helperLinkName = "lazybrew-askpass"
+
+// helperSocketFromInvocation reads helper mode out of argv when the
+// environment carries no markers. isHelper reports that argv[0] claims the
+// helper name at all; valid reports that the claim survives the same
+// canonical-shape checks the environment route applies, plus proof that the
+// link resolves to this very binary.
+//
+// SECURITY: argv[0] is attacker-influenceable — anyone with a shell can exec
+// this binary under the helper name above a crafted directory. That gains
+// nothing: the helper holds no secret of its own, and a password only ever
+// leaves the app after acquirePeerEvidence has verified the connecting peer
+// as a same-uid descendant of the job's own brew child carrying this
+// binary's code identity — which a process the attacker started is not.
+// Reaching a real job's socket also requires traversing its 0700 directory,
+// same-uid access that could already dial the socket directly, so the helper
+// adds no capability. The EvalSymlinks comparison additionally refuses to
+// act as askpass on behalf of any other binary.
+func helperSocketFromInvocation(args []string) (socket string, isHelper, valid bool) {
+	if len(args) == 0 || filepath.Base(args[0]) != helperLinkName {
+		return "", false, false
+	}
+	argv0 := args[0]
+	if !filepath.IsAbs(argv0) || filepath.Clean(argv0) != argv0 {
+		return "", true, false
+	}
+	dir := filepath.Dir(argv0)
+	tmpRoot, err := filepath.EvalSymlinks("/tmp")
+	if err != nil || filepath.Dir(dir) != tmpRoot || !validPrivateDirName(filepath.Base(dir)) {
+		return "", true, false
+	}
+	resolved, err := filepath.EvalSymlinks(argv0)
+	if err != nil {
+		return "", true, false
+	}
+	actual, err := resolvedExecutable()
+	if err != nil || resolved != actual {
+		return "", true, false
+	}
+	socket = filepath.Join(dir, "askpass.sock")
+	if len([]byte(socket)) > maxUnixPath {
+		return "", true, false
+	}
+	return socket, true, true
 }
 
 func writeHelperOutput(w io.Writer, password []byte) error {
@@ -269,8 +342,15 @@ func validateHelperMetadata(env []string) (helperMetadata, bool) {
 	if executable == "" || socketPath == "" || !filepath.IsAbs(executable) || !filepath.IsAbs(socketPath) || filepath.Clean(socketPath) != socketPath || len([]byte(socketPath)) > maxUnixPath {
 		return helperMetadata{}, false
 	}
+	// SUDO_ASKPASS names the per-job helper link rather than the binary, so
+	// the comparison resolves it first; a direct executable path keeps
+	// passing because it resolves to itself.
+	resolvedAskpass, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return helperMetadata{}, false
+	}
 	actual, err := resolvedExecutable()
-	if err != nil || actual != executable {
+	if err != nil || actual != resolvedAskpass {
 		return helperMetadata{}, false
 	}
 	tmpRoot, err := filepath.EvalSymlinks("/tmp")
@@ -321,9 +401,27 @@ type privateEndpoint struct {
 	rootPath   string
 	dirPath    string
 	socketPath string
+	helperPath string
 	listener   *net.UnixListener
 	closeOnce  sync.Once
 	closeErr   error
+}
+
+// installHelperLink creates the per-job SUDO_ASKPASS symlink next to the
+// socket, inside the directory createEndpoint has already verified as a
+// 0700-owned non-symlink. It is the socket's path-detection twin: fixed
+// name, private directory, removed by closeExact before the directory
+// itself so the directory removal stays a plain empty-dir Remove.
+func (p *privateEndpoint) installHelperLink(executable string) (string, error) {
+	if executable == "" || !filepath.IsAbs(executable) {
+		return "", errors.New("invalid askpass routing metadata")
+	}
+	path := filepath.Join(p.dirPath, helperLinkName)
+	if err := os.Symlink(executable, path); err != nil {
+		return "", err
+	}
+	p.helperPath = path
+	return path, nil
 }
 
 func createEndpoint() (_ *privateEndpoint, retErr error) {
@@ -390,6 +488,11 @@ func (p *privateEndpoint) closeExact() error {
 		}
 		if p.socketPath != "" {
 			if err := os.Remove(p.socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
+		}
+		if p.helperPath != "" {
+			if err := os.Remove(p.helperPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				errs = append(errs, err)
 			}
 		}

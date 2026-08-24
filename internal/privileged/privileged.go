@@ -119,7 +119,18 @@ func (u *runner) Start(parent context.Context, op brew.Operation, pkg brew.Packa
 	}
 
 	baseEnv := os.Environ()
-	env, err := canonicalEnvironment(baseEnv, u.executable, endpoint.socketPath)
+	// SUDO_ASKPASS points at a per-job symlink inside the private directory
+	// rather than at the executable itself. brew's bin/brew sanitizes the
+	// environment of everything it runs — SUDO_ASKPASS survives its whitelist
+	// but the LAZYBREW_* markers do not — so the invocation path is the one
+	// channel guaranteed to reach the helper. The helper recognises itself by
+	// that path (see RunHelperFromEnv) and derives the socket as its sibling.
+	helperPath, err := endpoint.installHelperLink(u.executable)
+	if err != nil {
+		cleanupErr := endpoint.closeExact()
+		return nil, fmt.Errorf("Could not start %s: %w", op.Verb(), errors.Join(err, cleanupErr))
+	}
+	env, err := canonicalEnvironment(baseEnv, helperPath, endpoint.socketPath)
 	if err != nil {
 		cleanupErr := endpoint.closeExact()
 		return nil, fmt.Errorf("Could not start %s: %w", op.Verb(), errors.Join(err, cleanupErr))
@@ -605,8 +616,12 @@ func (r *request) respond(typ byte, payload []byte) error {
 	return err
 }
 
-func canonicalEnvironment(base []string, executable, socketPath string) ([]string, error) {
-	if executable == "" || !filepath.IsAbs(executable) || socketPath == "" || !filepath.IsAbs(socketPath) {
+// canonicalEnvironment routes sudo at the job's helper link. The LAZYBREW_*
+// markers are still set for any child that preserves them (and for tests),
+// but they are advisory: brew strips them, so the helper's load-bearing
+// detection is the askpass path itself.
+func canonicalEnvironment(base []string, askpassPath, socketPath string) ([]string, error) {
+	if askpassPath == "" || !filepath.IsAbs(askpassPath) || socketPath == "" || !filepath.IsAbs(socketPath) {
 		return nil, errors.New("invalid askpass routing metadata")
 	}
 	env := make([]string, 0, len(base)+3)
@@ -623,7 +638,7 @@ func canonicalEnvironment(base []string, executable, socketPath string) ([]strin
 		}
 	}
 	return append(env,
-		sudoAskpassKey+"="+executable,
+		sudoAskpassKey+"="+askpassPath,
 		askpassModeKey+"=1",
 		askpassSocketKey+"="+socketPath,
 	), nil

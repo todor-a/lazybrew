@@ -309,3 +309,111 @@ func TestHelperOutputFailureDoesNotRetry(t *testing.T) {
 		t.Fatal("oversized helper output reached stdout")
 	}
 }
+
+// The path route must accept exactly the link Start installs — and derive the
+// sibling socket — while every spoofed spelling of the helper name fails
+// closed (handled, invalid) rather than falling through to normal startup.
+func TestHelperInvocationPathDetection(t *testing.T) {
+	endpoint, err := createEndpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.closeExact() })
+	executable, err := resolvedExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := endpoint.installHelperLink(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// sudo passes the prompt as a second argument; it must not matter.
+	socket, isHelper, valid := helperSocketFromInvocation([]string{link, "Password:"})
+	if !isHelper || !valid || socket != endpoint.socketPath {
+		t.Fatalf("real link rejected: socket=%q isHelper=%v valid=%v", socket, isHelper, valid)
+	}
+
+	// An ordinary invocation is not helper mode at all.
+	if _, isHelper, _ := helperSocketFromInvocation([]string{"/usr/local/bin/lazybrew"}); isHelper {
+		t.Fatal("ordinary invocation read as helper")
+	}
+
+	tmpRoot, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostiles := [][]string{
+		{helperLinkName}, // relative argv[0]
+		{filepath.Join(tmpRoot, "evil", helperLinkName)},                                     // wrong directory shape
+		{filepath.Join(tmpRoot, "lazybrew-aaaaaaaaaaaaaaaaaaaa", helperLinkName)},            // right shape, no link behind it
+		{endpoint.dirPath + "/../" + filepath.Base(endpoint.dirPath) + "/" + helperLinkName}, // unclean path
+	}
+	for _, args := range hostiles {
+		if _, isHelper, valid := helperSocketFromInvocation(args); !isHelper || valid {
+			t.Fatalf("hostile argv accepted: %v", args)
+		}
+	}
+}
+
+// A link pointing at some other binary must not be honored: this process will
+// not act as askpass on another program's behalf.
+func TestHelperInvocationRefusesForeignTarget(t *testing.T) {
+	endpoint, err := createEndpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = endpoint.closeExact() })
+	link, err := endpoint.installHelperLink("/bin/sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, isHelper, valid := helperSocketFromInvocation([]string{link}); !isHelper || valid {
+		t.Fatalf("foreign-target link accepted: isHelper=%v valid=%v", isHelper, valid)
+	}
+}
+
+// The env route keeps working when SUDO_ASKPASS names the link instead of the
+// binary, and the link is removed with the endpoint so the directory removal
+// stays a plain empty-dir Remove.
+func TestHelperLinkMetadataAndLifecycle(t *testing.T) {
+	endpoint, err := createEndpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := resolvedExecutable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := endpoint.installHelperLink(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := []string{
+		sudoAskpassKey + "=" + link,
+		askpassModeKey + "=1",
+		askpassSocketKey + "=" + endpoint.socketPath,
+	}
+	metadata, ok := validateHelperMetadata(env)
+	if !ok || metadata.socket != endpoint.socketPath {
+		t.Fatalf("linked metadata rejected: %+v ok=%v", metadata, ok)
+	}
+
+	if err := endpoint.closeExact(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{link, endpoint.socketPath, endpoint.dirPath} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s remains after closeExact", path)
+		}
+	}
+
+	other, err := createEndpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.closeExact() })
+	if _, err := other.installHelperLink("relative/lazybrew"); err == nil {
+		t.Fatal("relative executable accepted for the helper link")
+	}
+}
