@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,7 +112,11 @@ func runTool(ctx context.Context, path string, env, args []string) ([]byte, []by
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	start := time.Now()
 	err := cmd.Run()
+	slog.Debug("command finished",
+		"path", path, "args", args, "ms", time.Since(start).Milliseconds(),
+		"stdoutBytes", stdout.Len(), "err", err)
 	return stdout.Bytes(), stderr.Bytes(), MapCommandFailure(err, stdout.Bytes(), stderr.Bytes())
 }
 

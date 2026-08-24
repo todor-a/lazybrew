@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"slices"
 	"strconv"
@@ -352,6 +353,7 @@ type model struct {
 	contentRows   int
 	themeIndex    int
 	settingsPath  string
+	snapshotPath  string
 	monochrome    bool
 	// isDark picks each adaptive color's variant. It defaults to true and is
 	// corrected by the terminal's tea.BackgroundColorMsg reply: most terminals
@@ -406,6 +408,7 @@ type model struct {
 // settings persistence.
 func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, settingsDir string) (tea.Model, *Supervisor) {
 	settingsPath := settingsFile(settingsDir)
+	snapshotPath := snapshotFile(settingsDir)
 	items := list.New(nil, packageDelegate{}, 0, 0)
 	items.SetShowTitle(false)
 	items.SetShowFilter(false)
@@ -436,11 +439,21 @@ func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, 
 		monochrome:    os.Getenv("NO_COLOR") != "",
 		isDark:        true,
 		settingsPath:  settingsPath,
+		snapshotPath:  snapshotPath,
 		themeIndex:    themeIndexByName(ensureSettings(settingsPath).Theme),
 		loading:       true,
 		loadPurpose:   loadStartup,
 		spinnerActive: true,
 		listCache:     make(map[brew.Kind][]brew.Package),
+	}
+	// Seed the session caches from the last run's snapshot so Init can paint
+	// before the first brew call returns. The loads Init starts replace all of
+	// it; nothing here is trusted beyond the first frames.
+	if snap := loadSnapshot(snapshotPath); len(snap.Lists) > 0 {
+		for kind, packages := range snap.Lists {
+			m.listCache[kind] = packages
+		}
+		m.sizes = snap.Sizes
 	}
 	m.viewport = viewport.New(viewport.WithWidth(0), viewport.WithHeight(0))
 	m.viewport.SoftWrap = true
@@ -462,7 +475,17 @@ func substringFilter(term string, targets []string) []list.Rank {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.startList(loadStartup, 0), m.startSizes(), m.spinner.Tick, tea.RequestBackgroundColor)
+	// A seeded boot paints the previous session's inventory in the first frame
+	// and reloads underneath it, so the startup load is a refresh in every
+	// sense, including its status line. Showing the stale rows is safe: every
+	// argv re-validates names, and brew itself is the authority for every verb.
+	purpose, seedInfo := loadStartup, tea.Cmd(nil)
+	if cached, ok := m.listCache[m.kind]; ok {
+		m.setPackages(cached, 0)
+		purpose = loadRefresh
+		seedInfo = m.selectInfo()
+	}
+	return tea.Batch(m.startList(purpose, 0), m.startSizes(), m.spinner.Tick, tea.RequestBackgroundColor, seedInfo)
 }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -1104,6 +1127,7 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	if msg.id != m.sizesID {
 		return nil
 	}
+	slog.Debug("sizes result", "formulae", len(msg.sizes.Formula), "totalKB", msg.sizes.Total, "err", msg.err)
 	if m.sizesCancel != nil {
 		m.sizesCancel()
 	}
@@ -1123,6 +1147,7 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	}
 	sizes := msg.sizes
 	m.sizes = &sizes
+	m.persistSnapshot()
 	// Sizes arriving is the moment a size sort requested earlier becomes
 	// meaningful, so re-order from retention. ponytail: this resets selection to
 	// the top, because the order changed underneath the cursor. It happens at
@@ -1151,6 +1176,7 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 	if msg.id != m.loadID {
 		return nil
 	}
+	slog.Debug("list result", "kind", msg.kind, "rows", len(msg.packages), "err", msg.err)
 	if m.listCancel != nil {
 		m.listCancel()
 	}
@@ -1174,6 +1200,7 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 		return nil
 	}
 	m.listCache[msg.kind] = msg.packages
+	m.persistSnapshot()
 	m.setPackages(msg.packages, m.loadSelection)
 	if msg.purpose == loadAfterOperation {
 		name := ""

@@ -20,6 +20,7 @@ import (
 
 	"lazybrew/internal/brew"
 	"lazybrew/internal/info"
+	"lazybrew/internal/logging"
 	"lazybrew/internal/privileged"
 	"lazybrew/internal/ui"
 )
@@ -46,6 +47,8 @@ func run() int {
 	if home, err := os.UserHomeDir(); err == nil {
 		settingsDir = filepath.Join(home, "lazybrew")
 	}
+	closeLog := logging.Setup(settingsDir)
+	defer closeLog()
 	root, supervisor := ui.New(homebrew, loader, runner, settingsDir)
 	program := tea.NewProgram(root, tea.WithoutSignalHandler())
 
