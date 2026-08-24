@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -483,6 +484,10 @@ func (j *job) acceptLoop() {
 		}
 		j.mu.Unlock()
 		if busy {
+			// sudo retries a failed askpass up to three times; a retry landing
+			// while the first exchange is still active trips this guard, so
+			// the log must say which it was.
+			slog.Debug("askpass peer rejected", "reason", "another exchange already active")
 			_ = conn.Close()
 			j.failAuthentication(false)
 			continue
@@ -502,21 +507,36 @@ func (j *job) handleConnection(conn *net.UnixConn) {
 	}()
 	id, err := readRequest(conn)
 	if err != nil {
+		// Rejection paths are logged (names, pids, uids - never password
+		// bytes): a refused peer fails authentication in under a second with
+		// no dialog, which is indistinguishable from a wrong password without
+		// this trail. See the askpass field debugging that motivated it.
+		slog.Debug("askpass peer rejected", "reason", "request read failed", "err", err)
 		j.failAuthentication(false)
 		return
 	}
 	<-j.processReady
 	if j.childPID <= 1 || j.identityErr != nil {
+		slog.Debug("askpass peer rejected", "reason", "job identity unavailable", "childPID", j.childPID, "identityErr", j.identityErr)
 		_ = writeTerminal(conn, id, messageError, nil)
 		j.failAuthentication(false)
 		return
 	}
 	evidence, err := acquireEvidence(conn, j.childPID, j.pgid, j.executable, j.identity)
 	if err != nil || verifyEvidence(evidence) != nil {
+		verifyErr := error(nil)
+		if err == nil {
+			verifyErr = verifyEvidence(evidence)
+		}
+		slog.Debug("askpass peer rejected", "reason", "evidence refused",
+			"acquireErr", err, "verifyErr", verifyErr,
+			"peerUID", evidence.PeerUID, "expectedUID", evidence.ExpectedUID,
+			"peerPID", evidence.PeerPID, "trackedPID", evidence.TrackedPID)
 		_ = writeTerminal(conn, id, messageError, nil)
 		j.failAuthentication(false)
 		return
 	}
+	slog.Debug("askpass peer verified", "peerPID", evidence.PeerPID)
 
 	r := &request{id: id, conn: conn, done: make(chan struct{})}
 	j.mu.Lock()
