@@ -31,3 +31,14 @@ Runs the two mutating brew verbs with administrator authentication kept OUT of t
 
 ### External
 - cgo: Security + CoreFoundation frameworks (peer verification), libproc/sysctl.
+
+### Security consequence of SUDO_ASKPASS surviving brew (accepted scope)
+Everything brew runs inherits SUDO_ASKPASS - including formula/cask install and
+postinstall scripts. Any such descendant running `sudo -A <anything>` satisfies
+the peer chain (peer → sudo -A → … → the job's brew child, all in the tracked
+pgid), pops the password dialog, and on approval runs as root. This matches
+Homebrew's own trust model (approving an operation on a package already means
+running its scripts): the peer check binds the password to THIS JOB'S PROCESS
+TREE - the strongest binding available - not to one specific sudo invocation.
+Recorded from the PR #36 security review; do not "fix" this by weakening the
+chain check, and do not widen it either.

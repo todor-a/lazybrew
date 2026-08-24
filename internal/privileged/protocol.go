@@ -295,6 +295,15 @@ func helperSocketFromInvocation(args []string) (socket string, isHelper, valid b
 	if err != nil || filepath.Dir(dir) != tmpRoot || !validPrivateDirName(filepath.Base(dir)) {
 		return "", true, false
 	}
+	// The lexical checks above cannot tell a real private directory from a
+	// same-named symlink or a loosened one; require the same structure the
+	// app verified when it created the endpoint. Defense in depth only - a
+	// same-uid attacker can build a compliant directory of their own, and
+	// the password stays guarded by the app-side peer verification either
+	// way.
+	if verifyPath(dir, syscall.S_IFDIR, 0o700) != nil {
+		return "", true, false
+	}
 	resolved, err := filepath.EvalSymlinks(argv0)
 	if err != nil {
 		return "", true, false
@@ -417,10 +426,14 @@ func (p *privateEndpoint) installHelperLink(executable string) (string, error) {
 		return "", errors.New("invalid askpass routing metadata")
 	}
 	path := filepath.Join(p.dirPath, helperLinkName)
+	// Recorded before the syscall: os.Symlink refuses to clobber an existing
+	// entry, and on that failure the squatted file must still be removed by
+	// closeExact or the directory removal stops being a plain empty-dir
+	// Remove and the private directory outlives the job.
+	p.helperPath = path
 	if err := os.Symlink(executable, path); err != nil {
 		return "", err
 	}
-	p.helperPath = path
 	return path, nil
 }
 
