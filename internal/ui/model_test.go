@@ -1850,3 +1850,80 @@ func TestAFailedUntrustedReadStillLoadsAnUnmarkedList(t *testing.T) {
 		t.Fatal("a failed trust read produced a mark")
 	}
 }
+
+// The threshold is applied where the verdict is stamped, so every downstream
+// consumer agrees; the offered versions ride along even on suppressed rows.
+func TestMarkOutdatedAppliesTheThreshold(t *testing.T) {
+	rows := func() []brew.Package {
+		return []brew.Package{
+			{Name: "patchy", Version: "1.0.0", Kind: brew.Cask},
+			{Name: "minory", Version: "1.0.0", Kind: brew.Cask},
+			{Name: "majory", Version: "1.0.0", Kind: brew.Cask},
+			{Name: "weird", Version: "1.3.19-stable", Kind: brew.Cask},
+		}
+	}
+	verdict := []brew.OutdatedPackage{
+		{Name: "patchy", Installed: "1.0.0", Latest: "1.0.1"},
+		{Name: "minory", Installed: "1.0.0", Latest: "1.1.0"},
+		{Name: "majory", Installed: "1.0.0", Latest: "2.0.0"},
+		{Name: "weird", Installed: "1.3.19-stable", Latest: "1.4.0"},
+	}
+	cases := []struct {
+		threshold outdatedThreshold
+		want      []bool // patchy, minory, majory, weird
+	}{
+		{thresholdAny, []bool{true, true, true, true}},
+		{thresholdMinor, []bool{false, true, true, true}},
+		{thresholdMajor, []bool{false, false, true, true}},
+	}
+	for _, tc := range cases {
+		marked := markOutdated(rows(), verdict, true, tc.threshold)
+		for i, want := range tc.want {
+			if marked[i].Outdated != want {
+				t.Errorf("threshold %s: %s Outdated=%v, want %v", tc.threshold.name(), marked[i].Name, marked[i].Outdated, want)
+			}
+			// The unreadable pair ("weird") must be marked under every
+			// threshold: fail open, never hide what brew reported.
+			if marked[i].LatestVersion == "" {
+				t.Errorf("threshold %s: %s lost its offered version", tc.threshold.name(), marked[i].Name)
+			}
+		}
+	}
+}
+
+// End to end through the settings file: a "minor" threshold suppresses a
+// patch bump everywhere at once — no mark, and `u` refuses with the reason
+// rather than the false claim that the package is current.
+func TestSuppressedRowRefusesUpgradeWithTheReason(t *testing.T) {
+	dir := t.TempDir()
+	saveSettings(settingsFile(dir), settings{OutdatedThreshold: "minor"})
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {
+				{Name: "patchy", Version: "1.0.0", Kind: brew.Cask},
+				{Name: "current", Version: "1.0", Kind: brew.Cask},
+			},
+		},
+		outdated: map[brew.Kind][]brew.OutdatedPackage{brew.Cask: {
+			{Name: "patchy", Installed: "1.0.0", Latest: "1.0.1"},
+		}},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, dir)
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	row := m.list.Items()[0].(packageItem).packageValue
+	if row.Outdated || row.LatestVersion != "1.0.1" {
+		t.Fatalf("suppressed row=%+v, want unmarked but still carrying the offer", row)
+	}
+	m.updateNormal(textKey("u"))
+	if m.mode != modeNormal || m.status != "patchy: update below the outdated threshold" {
+		t.Fatalf("mode=%v status=%q, want a threshold refusal", m.mode, m.status)
+	}
+	m.updateNormal(textKey("j"))
+	m.updateNormal(textKey("u"))
+	if m.status != "current is up to date" {
+		t.Fatalf("status=%q, want the plain up-to-date guard for a row with no offer", m.status)
+	}
+}

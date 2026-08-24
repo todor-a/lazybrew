@@ -352,9 +352,14 @@ type model struct {
 	width, height int
 	contentRows   int
 	themeIndex    int
-	settingsPath  string
-	snapshotPath  string
-	monochrome    bool
+	// outdatedMinimum is the settings threshold, loaded once at construction.
+	// ponytail: changing it in the file takes effect next boot — the marks are
+	// stamped into listCache at load time; re-stamping the retained lists live
+	// is the upgrade if an in-app toggle ever exists.
+	outdatedMinimum outdatedThreshold
+	settingsPath    string
+	snapshotPath    string
+	monochrome      bool
 	// isDark picks each adaptive color's variant. It defaults to true and is
 	// corrected by the terminal's tea.BackgroundColorMsg reply: most terminals
 	// are dark, and a wrong first frame recolors rather than breaks.
@@ -409,6 +414,7 @@ type model struct {
 func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, settingsDir string) (tea.Model, *Supervisor) {
 	settingsPath := settingsFile(settingsDir)
 	snapshotPath := snapshotFile(settingsDir)
+	loaded := ensureSettings(settingsPath)
 	items := list.New(nil, packageDelegate{}, 0, 0)
 	items.SetShowTitle(false)
 	items.SetShowFilter(false)
@@ -427,25 +433,26 @@ func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, 
 	sp.Spinner = spinner.Line
 
 	m := &model{
-		homebrew:      homebrew,
-		info:          loader,
-		runner:        runner,
-		mode:          modeNormal,
-		kind:          brew.Cask,
-		list:          items,
-		help:          h,
-		spinner:       sp,
-		password:      blankPasswordInput(),
-		monochrome:    os.Getenv("NO_COLOR") != "",
-		isDark:        true,
-		settingsPath:  settingsPath,
-		snapshotPath:  snapshotPath,
-		themeIndex:    themeIndexByName(ensureSettings(settingsPath).Theme),
-		loading:       true,
-		loadPurpose:   loadStartup,
-		spinnerActive: true,
-		listCache:     make(map[brew.Kind][]brew.Package),
-		sortOrders:    make(map[brew.Kind]sortOrder),
+		homebrew:        homebrew,
+		info:            loader,
+		runner:          runner,
+		mode:            modeNormal,
+		kind:            brew.Cask,
+		list:            items,
+		help:            h,
+		spinner:         sp,
+		password:        blankPasswordInput(),
+		monochrome:      os.Getenv("NO_COLOR") != "",
+		isDark:          true,
+		settingsPath:    settingsPath,
+		snapshotPath:    snapshotPath,
+		themeIndex:      themeIndexByName(loaded.Theme),
+		outdatedMinimum: thresholdByName(loaded.OutdatedThreshold),
+		loading:         true,
+		loadPurpose:     loadStartup,
+		spinnerActive:   true,
+		listCache:       make(map[brew.Kind][]brew.Package),
+		sortOrders:      make(map[brew.Kind]sortOrder),
 	}
 	// Seed the session caches from the last run's snapshot so Init can paint
 	// before the first brew call returns. The loads Init starts replace all of
@@ -724,6 +731,15 @@ func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
 	// no-op, so it starts nothing at all: no confirmation, no snapshot, no job.
 	// The freshness cell is the affordance that says which rows this key acts on.
 	if op == brew.Upgrade && !selected.Outdated {
+		// A carried offer on an unmarked row means the outdated threshold
+		// suppressed the mark (markOutdated stamps LatestVersion only on rows
+		// brew named), so the refusal names the threshold instead of falsely
+		// claiming the package is current. One truth: the key follows the
+		// mark, and brew stays the executor either way.
+		if selected.LatestVersion != "" && selected.LatestVersion != selected.Version {
+			m.status, m.priority = selected.Name+": update below the outdated threshold", false
+			return nil
+		}
 		m.status, m.priority = selected.Name+" is up to date", false
 		return nil
 	}
@@ -1073,7 +1089,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 	done := make(chan struct{})
 	m.supervisor.setList(cancel, done)
 	m.listCancel = cancel
-	homebrew := m.homebrew
+	homebrew, threshold := m.homebrew, m.outdatedMinimum
 	return func() tea.Msg {
 		// Two concurrent reads, one command: the inventory and Homebrew's outdated
 		// verdict for the same kind, joined before either local is read. The
@@ -1116,7 +1132,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			id:       id,
 			kind:     kind,
 			purpose:  purpose,
-			packages: markUntrusted(markOutdated(packages, outdated, outdatedKnown), untrusted),
+			packages: markUntrusted(markOutdated(packages, outdated, outdatedKnown, threshold), untrusted),
 			err:      listErr,
 			done:     done,
 		}
@@ -1132,7 +1148,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 // always, and Version only where the inventory left it blank — both `brew
 // list` forms print bare names, so without this the row would show an arrow
 // pointing from nothing.
-func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, known bool) []brew.Package {
+func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, known bool, threshold outdatedThreshold) []brew.Package {
 	// Stamped on every row, not only the named ones, so the detail panel can tell
 	// "Homebrew says this is current" from "Homebrew was never asked".
 	for i := range packages {
@@ -1150,10 +1166,21 @@ func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, know
 		if !ok {
 			continue
 		}
-		packages[i].Outdated = true
+		// The versions ride along even when the threshold below suppresses
+		// the mark: the info pane still truthfully says "latest X", and the
+		// upgrade guard uses their presence to tell a suppressed row from a
+		// genuinely current one.
 		packages[i].LatestVersion = row.Latest
 		if packages[i].Version == "" {
 			packages[i].Version = row.Installed
+		}
+		// Classified over the verdict's own version pair, not the
+		// inventory's, so the threshold judges exactly what brew compared.
+		// An unreadable pair is DistanceUnknown, which clears every
+		// threshold: a mark is never hidden behind a string we could not
+		// read.
+		if threshold.allows(brew.VersionDistance(row.Installed, row.Latest)) {
+			packages[i].Outdated = true
 		}
 	}
 	return packages

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"lazybrew/internal/brew"
 )
 
 // settings is the on-disk preference file. Persistence is best-effort in both
@@ -17,6 +19,11 @@ type settings struct {
 	// drift from what this binary accepts.
 	Schema string `json:"$schema,omitempty"`
 	Theme  string `json:"theme"`
+	// OutdatedThreshold is how big a version jump must be before a package is
+	// marked outdated: "any" (default), "minor", or "major". Version distance
+	// rather than time because brew carries no per-version release dates
+	// anywhere, so time has no local data source.
+	OutdatedThreshold string `json:"outdatedThreshold"`
 }
 
 const schemaURL = "https://raw.githubusercontent.com/todor-a/lazybrew/main/settings.schema.json"
@@ -68,6 +75,7 @@ func ensureSettings(path string) settings {
 		return s
 	}
 	s.Theme = themes[themeIndexByName(s.Theme)].name
+	s.OutdatedThreshold = thresholdByName(s.OutdatedThreshold).name()
 	saveSettings(path, s)
 	return s
 }
@@ -82,4 +90,47 @@ func themeIndexByName(name string) int {
 		}
 	}
 	return 0
+}
+
+// outdatedThreshold is the version distance the outdated mark requires. It is
+// one truth applied everywhere the app says "outdated" — the ↑ freshness
+// cell, the row's version arrow, the info pane's verdict line, and the `u`
+// affordance — so no screen can contradict another.
+type outdatedThreshold uint8
+
+const (
+	thresholdAny outdatedThreshold = iota
+	thresholdMinor
+	thresholdMajor
+)
+
+// thresholdNames doubles as the settings enum; a test pins the published
+// schema to it exactly as the theme enum is pinned.
+var thresholdNames = []string{"any", "minor", "major"}
+
+// thresholdByName resolves a saved threshold, falling back to "any" for an
+// unknown or empty one — the same degrade-to-default contract as themes, and
+// the fail-open direction: the default hides nothing.
+func thresholdByName(name string) outdatedThreshold {
+	for i, n := range thresholdNames {
+		if n == name {
+			return outdatedThreshold(i)
+		}
+	}
+	return thresholdAny
+}
+
+func (t outdatedThreshold) name() string { return thresholdNames[t] }
+
+// allows reports whether a classified distance clears this threshold.
+// DistanceUnknown orders above every real distance (see brew.Distance), so an
+// unreadable version pair clears every threshold and is always marked.
+func (t outdatedThreshold) allows(d brew.Distance) bool {
+	switch t {
+	case thresholdMajor:
+		return d >= brew.DistanceMajor
+	case thresholdMinor:
+		return d >= brew.DistanceMinor
+	}
+	return true
 }

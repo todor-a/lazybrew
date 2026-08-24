@@ -894,3 +894,32 @@ func TestUntrustedRowClaimsTheFreshnessCell(t *testing.T) {
 		t.Fatalf("row width=%d, want 40", lipgloss.Width(marked))
 	}
 }
+
+// The bump highlight is enhancement only, and only where it can compose: the
+// selected row is styled whole-line so an inner reset would cut its
+// background, and monochrome carries no styling at all — both get plain text.
+func TestBumpHighlightBoldsOnlyUnselectedColoredRows(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.monochrome = false
+	pkg := brew.Package{Version: "1.0.1", LatestVersion: "1.2.0", Kind: brew.Cask}
+
+	highlighted := m.bumpHighlighted(pkg, false)
+	if !strings.HasPrefix(highlighted, "1.") || !strings.Contains(highlighted, "2.0") {
+		t.Fatalf("highlight lost the version text: %q", highlighted)
+	}
+	if highlighted == pkg.LatestVersion {
+		t.Fatal("unselected colored row carries no highlight")
+	}
+	if got := m.bumpHighlighted(pkg, true); got != pkg.LatestVersion {
+		t.Fatalf("selected row=%q, want plain text so the row style survives", got)
+	}
+	m.monochrome = true
+	if got := m.bumpHighlighted(pkg, false); got != pkg.LatestVersion {
+		t.Fatalf("monochrome=%q, want plain text", got)
+	}
+	m.monochrome = false
+	unreadable := brew.Package{Version: "1.3.19-stable", LatestVersion: "1.4.0", Kind: brew.Cask}
+	if got := m.bumpHighlighted(unreadable, false); got != unreadable.LatestVersion {
+		t.Fatalf("unreadable pair=%q, want plain text (fail open, no highlight)", got)
+	}
+}

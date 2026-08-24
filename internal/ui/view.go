@@ -423,7 +423,7 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 		// same end-of-line clipping as the version, so a narrow pane loses the
 		// detail, never the columns.
 		if pkg.Outdated && pkg.LatestVersion != "" && pkg.LatestVersion != pkg.Version {
-			line += " \u2192 " + pkg.LatestVersion
+			line += " \u2192 " + m.bumpHighlighted(pkg, selected)
 		}
 	}
 	if sizeWidth > 0 {
@@ -437,6 +437,29 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 		return lipgloss.NewStyle().Reverse(true).Bold(true).Render(line)
 	}
 	return m.roleStyle(m.currentTheme().selected).Bold(true).Render(line)
+}
+
+// bumpHighlighted emboldens the offered version from the first differing
+// segment onward (1.0.1 → 1.**2.0**), so the eye lands on what actually
+// moved. Unselected colored rows only: the selected row already renders
+// whole-line bold under its background, and styling a segment inside it would
+// end that background at the inner reset — the same composition rule the
+// two-tone footer documents — while monochrome drops styling entirely. Both
+// omissions cost nothing because bold is enhancement only; the arrow text is
+// the carrier of meaning. An unreadable version pair gets no highlight, plain
+// text, mirroring the parser's fail-open contract.
+// ponytail: the info pane keeps its plain "(outdated, latest X)" wording;
+// style it only if that panel ever grows styled text at all.
+func (m *model) bumpHighlighted(pkg brew.Package, selected bool) string {
+	latest := pkg.LatestVersion
+	if selected || m.monochrome {
+		return latest
+	}
+	offset := brew.BumpOffset(pkg.Version, latest)
+	if offset < 0 {
+		return latest
+	}
+	return latest[:offset] + lipgloss.NewStyle().Bold(true).Render(latest[offset:])
 }
 
 func (m *model) infoLines(width, height int) []string {
