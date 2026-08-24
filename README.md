@@ -1,101 +1,93 @@
 # lazybrew
 
-A macOS-only terminal interface for inspecting and safely uninstalling Homebrew packages, inspired by lazygit.
+**lazygit for your Homebrew packages — see what's installed, what's outdated, and what's eating your disk.**
 
-## What it does
+![release](https://img.shields.io/github/v/release/todor-a/lazybrew) ![ci](https://github.com/todor-a/lazybrew/actions/workflows/pr.yml/badge.svg?branch=main) ![go](https://img.shields.io/badge/go-1.27-00ADD8) ![platform](https://img.shields.io/badge/platform-macOS-black)
 
-lazybrew starts with your installed casks and lets you switch to formulae that you explicitly requested. It provides:
+![lazybrew demo](.github/demo.gif)
 
-- Case-insensitive substring search across package name, version, and kind.
-- A curated information pane on wide terminals with version, size, and homepage details.
-- Formula dependents and a removal verdict when that information is available.
-- Confirmed, progress-aware package removal through Homebrew.
-- Four built-in themes: Lazygit, Bright, Ocean, and Dracula.
+## Why
 
-lazybrew is deliberately focused: it does not install, upgrade, or pin packages, and it does not manage dependency-only formulae.
+`brew` answers questions one package at a time. lazybrew answers the fleet-sized ones at a glance: which of 300 formulae are stale, which ten are hogging 9 GB of Cellar, what breaks if this one goes — and then uninstalls or upgrades with a confirmation designed to be hard to fat-finger.
 
-## Install and run
+## Features
 
-Homebrew is the primary installation path:
+- **Instant startup** — the last session's inventory paints in the first frame from an on-disk snapshot, then refreshes underneath. No more staring at "Loading…".
+- **Outdated, with the actual versions** — `↑` marks plus `12.24.4 → 12.24.5` right in the row, straight from `brew outdated`. Never `--greedy`, so it will not claim an auto-updating cask is stale.
+- **Size accounting** — every formula's installed size from one `du` pass over the Cellar, with the fleet total. Casks are deliberately unsized: their Caskroom entries lie, and lazybrew does not print numbers that are not sizes.
+- **A real table** — column headings with a sort cue; `o` cycles name ↑ → size ↓ → size ↑ → name ↓ per screen.
+- **Untrusted-tap marks** — `!` on packages whose third-party tap Homebrew refuses to load, with brew's own `brew trust` remedy shown in the info pane.
+- **Removal verdicts** — the info pane shows what depends on a formula and whether it is safe to remove.
+- **Queue actions, keep browsing** — the list stays navigable while an uninstall or upgrade runs; confirm more actions and they queue up and run serially, shown live at the bottom of the info pane.
+- **Dependency X-ray** — formulae installed as dependencies are hidden by default; `a` reveals them.
+- **Four themes**, adapted to your terminal's light or dark background. `NO_COLOR` respected.
+
+## Install
 
 ```sh
 brew install todor-a/tap/lazybrew
-```
-
-Launch the TUI:
-
-```sh
 lazybrew
 ```
 
-Update to the latest release:
-
-```sh
-brew upgrade --cask lazybrew
-```
-
-To remove lazybrew itself:
-
-```sh
-brew uninstall --cask lazybrew
-```
+Upgrade or remove lazybrew itself with `brew upgrade --cask lazybrew` / `brew uninstall --cask lazybrew`.
 
 ## Keys
 
-| Key | Action |
+| Browse | |
 | --- | --- |
-| `↑` or `k` | Move up |
-| `↓` or `j` | Move down |
-| `/`, `s`, or `S` | Search packages |
-| `Tab` | Switch between casks and explicitly requested formulae |
-| `u` or `U` | Uninstall the selected package |
-| `t` or `T` | Cycle the theme |
-| `r` or `R` | Refresh package data |
-| `q` or `Q` | Quit |
+| `↑`/`k`, `↓`/`j` | Move; the info pane follows |
+| `Tab` | Switch between Apps (casks) and Formulae |
+| `/` or `s` | Search (substring, case-insensitive) |
+| `a` | Show/hide dependency-only formulae |
+| `o` | Cycle the sort: name ↑ · size ↓ · size ↑ · name ↓ |
+| `t` | Cycle the theme (persisted) |
+| `r` | Refresh from Homebrew |
+| `q` | Quit |
 
-Search matches a case-insensitive substring against the package name, version, and kind. While searching:
-
-| Key | Action |
+| Act | |
 | --- | --- |
-| Printable text | Append to the query |
-| `Backspace` or `Ctrl+H` | Delete the last query character |
-| `Enter` | Accept the current query and exit search |
-| `Esc` | Clear the query and exit search |
-| `Tab` | Switch package kind, preserve the query, and exit search |
+| `d` | Uninstall the selected package (confirm first) |
+| `u` | Upgrade the selected package — only offered when Homebrew reports it outdated |
 
-## Safe uninstall behavior
+While an action runs you can keep browsing, and `d`/`u` on other rows queues them.
 
-Press `u` or `U` to request removal of the selected package. lazybrew delegates removal to `brew uninstall`; it does not construct shell commands.
+In search: type to filter, `Enter` keeps the query, `Esc` clears it, `Tab` switches kind with the query intact.
 
-The confirmation is intentionally strict: only lowercase `y` proceeds; every other ordinary key, including uppercase `Y`, `Enter`, `Esc`, and `q`, cancels without running the uninstall. During removal, lazybrew shows progress and reloads Homebrew package data before reporting success.
+## Safety
 
-If Homebrew invokes sudo askpass, lazybrew opens a masked administrator password dialog inside the TUI. The password is not cached, logged, copied to the clipboard, or added to a shell command. The dialog does not appear unless Homebrew requests it.
+Uninstall and upgrade are delegated to `brew` — lazybrew never constructs shell commands, and package names are validated before they reach an argv.
 
-## Requirements and source build
+The confirmation is deliberately strict: **only lowercase `y` proceeds**. `Y`, `Enter`, `Esc`, `q` — everything else cancels. If Homebrew needs administrator rights, lazybrew shows a masked password dialog inside the TUI; the password is handed to Homebrew's askpass mechanism and is never cached, logged, or written anywhere else. Cancelling mid-run also drops everything still queued — destructive work never continues past a cancel.
 
-Running lazybrew requires:
+## Themes
 
-- macOS on Apple silicon or Intel.
-- Homebrew available on `PATH`.
-- An interactive stdin and stdout TTY.
-- A terminal at least 32 columns wide and 9 rows high.
+<details>
+<summary>Lazygit (default) · Bright · Ocean · Dracula</summary>
 
-Homebrew installs a prebuilt macOS arm64 or amd64 cask generated by GoReleaser.
+| | |
+| --- | --- |
+| ![Lazygit theme](.github/themes/lazygit.png) | ![Bright theme](.github/themes/bright.png) |
+| ![Ocean theme](.github/themes/ocean.png) | ![Dracula theme](.github/themes/dracula.png) |
 
-To build from source, install Go 1.27 in addition to the runtime requirements, then run from the repository root:
+</details>
+
+## Requirements
+
+- macOS (Apple silicon or Intel), Homebrew on `PATH`.
+- An interactive terminal, at least 32×9.
+
+## Development
 
 ```sh
-go build -o lazybrew ./cmd/lazybrew
-```
-
-Run the development test suite with:
-
-```sh
+go build -o lazybrew ./cmd/lazybrew   # Go 1.27
 go test ./...
 ```
 
-## Release automation
+Run via `go run ./cmd/lazybrew` and the log at `~/lazybrew/lazybrew.log` switches to debug — JSON lines with every brew command and its duration. The demo GIF and theme screenshots are recorded with [vhs](https://github.com/charmbracelet/vhs) from the tapes in `.github/`.
 
-Tags matching `v*` run release CI for both macOS ARM and Intel. GoReleaser publishes the platform archives, checksums, and release notes, then generates the cask used by the Homebrew tap.
+<details>
+<summary>Release automation</summary>
 
-The tap update is pushed with a deploy key scoped to that tap repository.
+Tags matching `v*` run release CI for macOS ARM and Intel. GoReleaser publishes the platform archives, checksums, and release notes, then generates the cask used by the Homebrew tap. The tap update is pushed with a deploy key scoped to that tap repository.
+
+</details>
