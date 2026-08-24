@@ -679,6 +679,9 @@ func (m *model) isQueued(pkg brew.Package) bool {
 func (m *model) dropQueue() int {
 	dropped := len(m.queue)
 	m.queue = nil
+	if dropped > 0 {
+		slog.Debug("queue dropped", "entries", dropped)
+	}
 	return dropped
 }
 
@@ -914,6 +917,7 @@ func (m *model) updateConfirmation(key tea.KeyPressMsg) tea.Cmd {
 		m.queue = append(m.queue, queuedOperation{verb: m.confirmVerb, pkg: *snapshot})
 		m.mode = modeOperation
 		m.status, m.priority = queuedStatus(m.confirmVerb, snapshot.Name), true
+		slog.Debug("job queued", "verb", m.confirmVerb.Verb(), "name", snapshot.Name, "queueLength", len(m.queue))
 		return nil
 	}
 	m.verb = m.confirmVerb
@@ -995,6 +999,9 @@ func (m *model) startUninstall(snapshot brew.Package) tea.Cmd {
 	m.cancelReason = cancelNone
 	m.status, m.priority = progressStatus(m.verb, snapshot.Name), true
 	m.spinnerActive = true
+	// The privileged job never passes through runTool's command log, so its
+	// lifecycle is logged here. Names and verbs only - never password bytes.
+	slog.Debug("job started", "verb", m.verb.Verb(), "name", snapshot.Name, "id", id, "queued", len(m.queue))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.operationCancel = cancel
@@ -1132,6 +1139,14 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 	}
 
 	result := msg.result
+	name := ""
+	if m.operation != nil {
+		name = m.operation.Name
+	}
+	slog.Debug("job finished",
+		"verb", m.verb.Verb(), "name", name, "id", msg.id,
+		"cancelled", result.Cancelled, "authFailed", result.AuthFailed,
+		"authTimedOut", result.AuthTimedOut, "err", result.Err, "queued", len(m.queue))
 	switch {
 	case result.CleanupErr != nil:
 		status := cleanupFailedStatus(m.verb, flattenStatus(result.CleanupErr.Error()))
@@ -1163,6 +1178,7 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 			next := m.queue[0]
 			m.queue = m.queue[1:]
 			m.verb = next.verb
+			slog.Debug("job popped from queue", "verb", next.verb.Verb(), "name", next.pkg.Name, "remaining", len(m.queue))
 			return m.startUninstall(next.pkg)
 		}
 		selection := m.list.Index()

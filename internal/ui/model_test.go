@@ -538,6 +538,33 @@ func TestOperationsQueueAndRunSerially(t *testing.T) {
 
 // A cancelled or failed job never lets queued work continue, and the status
 // names what was dropped rather than reading as work done.
+// The queue block must survive an empty selection: mid-run, a search that
+// matches nothing clears the selection, and the pane's early blank-out used to
+// take the only view of the running and queued work with it.
+func TestQueueOverlaySurvivesAnEmptySelection(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	startFakeUninstall(t, m, uninstaller)
+
+	m.Update(textKey("j"))
+	m.Update(textKey("d"))
+	m.Update(textKey("y"))
+	if len(m.queue) != 1 {
+		t.Fatalf("queue=%d, want 1", len(m.queue))
+	}
+
+	m.query = "no-such-package"
+	m.applyFilter(0)
+	if m.selectedPackage() != nil {
+		t.Fatal("filter should have cleared the selection")
+	}
+	pane := strings.Join(m.infoLines(40, 10), "\n")
+	for _, want := range []string{"Queue", "queued · uninstall Beta"} {
+		if !strings.Contains(pane, want) {
+			t.Fatalf("info pane %q missing %q with no selection", pane, want)
+		}
+	}
+}
+
 func TestQueueDropsWhenTheRunningJobFails(t *testing.T) {
 	m, uninstaller := newTestModel(t)
 	startFakeUninstall(t, m, uninstaller)
