@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -40,7 +41,12 @@ func run() int {
 	homebrew := brew.New()
 	loader := info.New(info.Details(homebrew.Info, homebrew.Uses))
 	runner := privileged.New()
-	root, supervisor := ui.New(homebrew, loader, runner)
+	// A failed lookup disables settings persistence rather than the app.
+	settingsDir := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		settingsDir = filepath.Join(home, "lazybrew")
+	}
+	root, supervisor := ui.New(homebrew, loader, runner, settingsDir)
 	program := tea.NewProgram(root, tea.WithoutSignalHandler())
 
 	signals := make(chan os.Signal, 1)
