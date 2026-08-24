@@ -499,7 +499,7 @@ func kindPlural(kind brew.Kind) string {
 }
 
 func (m *model) footerLine(width int) string {
-	keys := normalHelp
+	keys := helpFor(m.kind)
 	switch {
 	case m.mode == modeQuitting:
 		keys = cleanupHelp
@@ -512,7 +512,7 @@ func (m *model) footerLine(width int) string {
 	case m.mode == modePassword:
 		keys = progressHelp(m.verb)
 	case m.mode == modeOperation:
-		keys = operationHelp(m.verb)
+		keys = operationHelp(m.verb, m.kind)
 	}
 	// Two-tone, and every segment carries the full footer role rather than relying
 	// on an enclosing style. A single outer Render over pre-styled segments would

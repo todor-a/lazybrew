@@ -666,6 +666,16 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		}
 		return cmd
 	case "o", "O":
+		// Screen-aware, unlike `a`: this key acts on the list it is pressed
+		// over. Casks are unsized by design (see brew.Sizes), so on the Apps
+		// screen there is no order to toggle, and flipping the formula flag
+		// from here would re-order a screen the user is not looking at. The
+		// key still answers with the reason, and the Apps footer does not
+		// advertise it at all.
+		if m.kind != brew.Formula {
+			m.status, m.priority = "Casks have no sizes to sort", false
+			return nil
+		}
 		m.sortBySize = !m.sortBySize
 		cmd, applied := m.reorder()
 		if applied {

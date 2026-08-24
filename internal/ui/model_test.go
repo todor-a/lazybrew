@@ -1275,6 +1275,27 @@ func TestDependencyToggleOnTheCaskListOnlyReportsStatus(t *testing.T) {
 	}
 }
 
+// The size sort is screen-aware: on the Apps screen the key explains itself
+// without flipping anything - a toggle here would re-order the formula screen
+// behind the user's back - and the Apps footer does not advertise the key.
+func TestSizeSortIsFormulaScreenOnly(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.updateNormal(textKey("o"))
+	if m.sortBySize {
+		t.Fatal("sort flag flipped from the cask screen")
+	}
+	if m.status != "Casks have no sizes to sort" || m.priority {
+		t.Fatalf("status=%q priority=%v, want the unsized-casks explanation", m.status, m.priority)
+	}
+	if footer := m.footerLine(80); strings.Contains(footer, "Sort") {
+		t.Fatalf("cask footer advertises sort: %q", footer)
+	}
+	drainList(t, m, m.switchKind())
+	if footer := m.footerLine(80); !strings.Contains(footer, "Sort") {
+		t.Fatalf("formula footer lost sort: %q", footer)
+	}
+}
+
 func TestSizeSortOrdersLargestFirstAndBackToSourceOrder(t *testing.T) {
 	m, _ := newFleetModel(t)
 	drainList(t, m, m.switchKind())
@@ -1656,6 +1677,11 @@ func TestASizeSortRequestSurvivesAConfirmationDialog(t *testing.T) {
 // load error - with a claim about an order the user cannot see.
 func TestAToggleWithNoRetainedListKeepsTheExistingStatus(t *testing.T) {
 	m, _ := newTestModel(t)
+	// On the formula screen: the cask screen now answers `o` with its own
+	// explanation instead of toggling, so the no-retained-list guard - never
+	// replace a load error with a claim about an order the user cannot see -
+	// only has meaning where the toggle still happens.
+	drainList(t, m, m.switchKind())
 	m.setPackages(nil, 0)
 	delete(m.listCache, m.kind)
 	m.status, m.priority = "brew exploded", false
