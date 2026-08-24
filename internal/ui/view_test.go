@@ -196,7 +196,8 @@ func TestColorProfileClassificationAndNoColor(t *testing.T) {
 		got := m.packageLine(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask}, true, 40)
 		plain := ansiSequence.ReplaceAllString(got, "")
 		want := lipgloss.NewStyle().Reverse(true).Bold(true).Render(plain)
-		if got != want || !strings.Contains(plain, "> Alpha") {
+		// ">  Alpha": marker, the blank freshness cell, then the name column.
+		if got != want || !strings.Contains(plain, ">  Alpha") {
 			t.Fatalf("ASCII selection=%q, want reverse+bold %q", got, want)
 		}
 	})
@@ -384,18 +385,326 @@ func TestScrollbarThumbSitsFlushAtBothEnds(t *testing.T) {
 	}
 }
 
+func TestOutdatedRowCarriesAFixedFreshnessCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	plain := func(pkg brew.Package, selected bool) string {
+		return ansiSequence.ReplaceAllString(m.packageLine(pkg, selected, 40), "")
+	}
+	stale := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Outdated: true}, true)
+	fresh := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask}, true)
+	if !strings.HasPrefix(stale, " >↑ Alpha") {
+		t.Fatalf("outdated row=%q, want a marker then the ↑ cell", stale)
+	}
+	if !strings.HasPrefix(fresh, " >  Alpha") {
+		t.Fatalf("fresh row=%q, want a marker then a blank cell", fresh)
+	}
+	if lipgloss.Width(stale) != 40 || lipgloss.Width(fresh) != 40 {
+		t.Fatalf("row widths=%d and %d, want 40 each", lipgloss.Width(stale), lipgloss.Width(fresh))
+	}
+
+	unselected := plain(brew.Package{Name: "Alpha", Kind: brew.Cask, Outdated: true}, false)
+	if !strings.HasPrefix(unselected, "  ↑ Alpha") {
+		t.Fatalf("unselected outdated row=%q, want the cell independent of the marker", unselected)
+	}
+}
+
+// The freshness cell is one terminal cell wide by assumption, and every pinned
+// row width depends on it. A lipgloss bump that changed its measured width would
+// otherwise shift every row at runtime with no test noticing.
+func TestOutdatedGlyphIsOneCell(t *testing.T) {
+	if got := lipgloss.Width("↑"); got != 1 {
+		t.Fatalf("lipgloss.Width(\"↑\")=%d, want 1", got)
+	}
+}
+
+func TestFooterListsEveryNormalKey(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	lines := strippedLines(m)
+	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
+	want := "[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit"
+	if footer != want {
+		t.Fatalf("footer=%q, want %q", footer, want)
+	}
+}
+
+// The size column is reserved before the measurement lands, so the name and
+// origin columns sit at the same cells either way and nothing reflows when sizes
+// arrive seconds after first paint.
+// The column is reserved on the formula list before the measurement arrives, so
+// a late size cannot reflow rows the user is already reading. The cask list
+// reserves nothing, because it is never measured.
+func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
+	m, _ := newTestModel(t)
+	switchTo(t, m)
+
+	for _, width := range []int{32, 72, 120} {
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
+		measured := strippedLines(m)[3]
+
+		landed := m.sizes
+		m.sizes = nil
+		blank := strippedLines(m)[3]
+		m.sizes = landed
+
+		if lipgloss.Width(measured) != lipgloss.Width(blank) {
+			t.Fatalf("at width %d the row changed width when sizes landed: %q vs %q", width, blank, measured)
+		}
+		if index := cellIndex(blank, "formula"); index < 0 || index != cellIndex(measured, "formula") {
+			t.Fatalf("at width %d the origin column moved when sizes landed: %q vs %q", width, blank, measured)
+		}
+		if !strings.Contains(measured, "1MB") {
+			t.Fatalf("at width %d the measured row carries no size: %q", width, measured)
+		}
+		if strings.ContainsAny(strings.TrimRight(blank, " │"), "KMG") {
+			t.Fatalf("at width %d the unmeasured row invented a size: %q", width, blank)
+		}
+	}
+
+	// Back on the cask list: no size, measured or not.
+	switchTo(t, m)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 16})
+	if row := strippedLines(m)[3]; strings.ContainsAny(strings.TrimRight(row, " │"), "KMG") {
+		t.Fatalf("the cask row carries a size: %q", row)
+	}
+}
+
+func TestRowShapeAndNameColumnBounds(t *testing.T) {
+	m, _ := newTestModel(t)
+	tests := []struct {
+		name  string
+		pkg   brew.Package
+		width int
+		want  string
+	}{
+		{
+			// No size column: the Caskroom is not measured, so the cask list
+			// reserves nothing for it and the name column keeps that width.
+			name:  "cask row",
+			pkg:   brew.Package{Name: "Alpha", Kind: brew.Cask},
+			width: 40,
+			want:  "    Alpha                          cask ",
+		},
+		{
+			name:  "on-request formula",
+			pkg:   brew.Package{Name: "vault", Kind: brew.Formula},
+			width: 40,
+			want:  "    vault                 formula       ",
+		},
+		{
+			name:  "dependency formula carries dep in the origin column",
+			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
+			width: 40,
+			want:  "    llvm@22               dep           ",
+		},
+		{
+			// 32-column narrow layout with a scrollbar: the tightest supported row.
+			name:  "narrowest supported row keeps the pinned name minimum",
+			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
+			width: 29,
+			want:  "    llvm@22    dep           ",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m.sizes = nil
+			// A row is only ever drawn on its own kind's list, and the reserved size
+			// column depends on which list that is.
+			m.kind = tt.pkg.Kind
+			got := ansiSequence.ReplaceAllString(m.packageLine(tt.pkg, false, tt.width), "")
+			if got != tt.want {
+				t.Fatalf("row=%q, want %q", got, tt.want)
+			}
+			if lipgloss.Width(got) != tt.width {
+				t.Fatalf("row width=%d, want %d", lipgloss.Width(got), tt.width)
+			}
+		})
+	}
+}
+
+// The total is the Cellar's, so it renders on the formula list and nowhere else.
+func TestHeaderCarriesTheFleetTotalOnTheFormulaListOnly(t *testing.T) {
+	m, _ := newTestModel(t)
+	switchTo(t, m)
+	if m.kind != brew.Formula {
+		t.Fatalf("kind = %q, want the formula list", m.kind)
+	}
+
+	for _, width := range []int{32, 72, 120} {
+		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
+		header := strippedLines(m)[1]
+		if lipgloss.Width(header) != width {
+			t.Fatalf("at width %d header width=%d", width, lipgloss.Width(header))
+		}
+		if !strings.Contains(header, "Apps    [ Formulae ]") {
+			t.Fatalf("at width %d the tab bar was disturbed: %q", width, header)
+		}
+		// Right aligned against the interior edge, so it reads as the column's sum.
+		if !strings.HasSuffix(header, "9.2GB│") {
+			t.Fatalf("at width %d the total is not flush right: %q", width, header)
+		}
+	}
+
+	// The cask list is not measured, so it must claim no total.
+	switchTo(t, m)
+	if header := strippedLines(m)[1]; strings.Contains(header, "GB") {
+		t.Fatalf("the cask header claimed a Cellar total: %q", header)
+	}
+
+	m.sizes = nil
+	if header := strippedLines(m)[1]; strings.Contains(header, "GB") {
+		t.Fatalf("header claimed a total before measuring: %q", header)
+	}
+}
+
+// The layout guarantees the total fits at the minimum renderable width: the
+// interior is 30 cells and the tab bar plus a gap plus a six-cell total is 29.
+func TestTotalFitsTheMinimumInterior(t *testing.T) {
+	m, _ := newTestModel(t)
+	switchTo(t, m)
+	m.Update(tea.WindowSizeMsg{Width: 32, Height: 9})
+	if got := m.headerLine(); got != "  Apps    [ Formulae ]   9.2GB" {
+		t.Fatalf("header at the minimum width=%q", got)
+	}
+	if got := lipgloss.Width(m.headerLine()); got > 30 {
+		t.Fatalf("header interior width=%d, want at most 30", got)
+	}
+}
+
+func TestHumanKBSpellingAndSixCellCeiling(t *testing.T) {
+	tests := []struct {
+		kilobytes int64
+		want      string
+	}{
+		{kilobytes: 0, want: "0KB"},
+		{kilobytes: 12, want: "12KB"},
+		{kilobytes: 1023, want: "1023KB"},
+		{kilobytes: 1024, want: "1MB"},
+		{kilobytes: 48568, want: "47MB"},
+		{kilobytes: 1048576, want: "1.0GB"},
+		{kilobytes: 1550732, want: "1.5GB"},
+		{kilobytes: 11902796, want: "11.4GB"},
+		{kilobytes: 104857600, want: "100GB"},
+		{kilobytes: -1, want: ""},
+	}
+	for _, tt := range tests {
+		got := humanKB(tt.kilobytes)
+		if got != tt.want {
+			t.Errorf("humanKB(%d) = %q, want %q", tt.kilobytes, got, tt.want)
+		}
+		if lipgloss.Width(got) > 6 {
+			t.Errorf("humanKB(%d) = %q, wider than the reserved 6 cells", tt.kilobytes, got)
+		}
+	}
+
+	// The 6-cell ceiling holds below 10 TB, which is already past where the
+	// decimal is dropped. Beyond that the value widens, and the header omits it
+	// rather than clipping the tab bar.
+	if got := humanKB(10736369664); got != "10239GB" {
+		t.Errorf("humanKB(10736369664) = %q, want %q", got, "10239GB")
+	}
+}
+
 func TestScrollbarNeverChangesTheRenderedWidth(t *testing.T) {
 	m, _ := newTestModel(t)
 	for _, size := range []tea.WindowSizeMsg{
 		{Width: 32, Height: 9}, {Width: 40, Height: 9},
 		{Width: 71, Height: 10}, {Width: 72, Height: 10}, {Width: 80, Height: 9},
+		{Width: 120, Height: 40},
 	} {
-		m.Update(size)
-		for row, line := range strippedLines(m) {
-			if got := lipgloss.Width(line); got != size.Width {
-				t.Fatalf("at %dx%d row %d width=%d, want %d: %q",
-					size.Width, size.Height, row, got, size.Width, line)
+		// Both size states, because the size column is reserved before the
+		// measurement lands and filled afterwards.
+		for _, measured := range []bool{true, false} {
+			landed := m.sizes
+			if !measured {
+				m.sizes = nil
 			}
+			m.Update(size)
+			for row, line := range strippedLines(m) {
+				if got := lipgloss.Width(line); got != size.Width {
+					t.Fatalf("at %dx%d measured=%v row %d width=%d, want %d: %q",
+						size.Width, size.Height, measured, row, got, size.Width, line)
+				}
+			}
+			m.sizes = landed
 		}
 	}
+}
+
+// The name-column arithmetic in packageLine decides where the kind column lands.
+// Nothing else pinned it: fit() pads every row to the pane width unconditionally,
+// so an off-by-one there only shifts the kind column and eats one name character,
+// which no width assertion can see. These indices are written out rather than
+// recomputed from the formula, so the test disagrees with the code when the code
+// changes.
+func TestPackageRowKindColumnLandsAtAFixedCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	for _, tt := range []struct {
+		name      string
+		pkg       brew.Package
+		width     int
+		wantIndex int
+	}{
+		{"cask at 20", brew.Package{Name: "alpha", Kind: brew.Cask}, 20, 16},
+		{"cask at 32", brew.Package{Name: "alpha", Kind: brew.Cask}, 32, 28},
+		{"cask at 40", brew.Package{Name: "alpha", Kind: brew.Cask}, 40, 35},
+		{"cask at 72", brew.Package{Name: "alpha", Kind: brew.Cask}, 72, 35},
+		{"formula at 32", brew.Package{Name: "alpha", Kind: brew.Formula}, 32, 25},
+		{"formula at 40", brew.Package{Name: "alpha", Kind: brew.Formula}, 40, 33},
+		{"long name at 40", brew.Package{Name: strings.Repeat("x", 60), Kind: brew.Cask}, 40, 35},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			plain := ansiSequence.ReplaceAllString(m.packageLine(tt.pkg, false, tt.width), "")
+			if got := lipgloss.Width(plain); got != tt.width {
+				t.Fatalf("row width = %d, want %d: %q", got, tt.width, plain)
+			}
+			kind := string(tt.pkg.Kind)
+			got := cellIndex(plain, kind)
+			if got != tt.wantIndex {
+				t.Fatalf("kind column at cell %d, want %d: %q", got, tt.wantIndex, plain)
+			}
+		})
+	}
+}
+
+// The freshness cell is fixed-width whether or not it is marked, so a marked row
+// cannot shift the columns of its neighbours.
+func TestOutdatedMarkerDoesNotShiftTheRow(t *testing.T) {
+	m, _ := newTestModel(t)
+	fresh := brew.Package{Name: "alpha", Kind: brew.Cask}
+	stale := brew.Package{Name: "alpha", Kind: brew.Cask, Outdated: true}
+
+	plainOf := func(p brew.Package) string {
+		return ansiSequence.ReplaceAllString(m.packageLine(p, false, 40), "")
+	}
+	a, b := plainOf(fresh), plainOf(stale)
+	if cellIndex(a, "cask") != cellIndex(b, "cask") {
+		t.Fatalf("marker moved the kind column:\n fresh %q\n stale %q", a, b)
+	}
+	if lipgloss.Width(a) != lipgloss.Width(b) {
+		t.Fatalf("marker changed the row width: %d vs %d", lipgloss.Width(a), lipgloss.Width(b))
+	}
+	if !strings.Contains(b, "↑") || strings.Contains(a, "↑") {
+		t.Fatalf("marker not applied exactly to the outdated row:\n fresh %q\n stale %q", a, b)
+	}
+}
+
+// cellIndex reports where needle starts in display cells, not bytes. The outdated
+// marker is multi-byte, so a byte offset reports a column shift on a marked row
+// whose columns are in fact identical.
+func cellIndex(haystack, needle string) int {
+	at := strings.Index(haystack, needle)
+	if at < 0 {
+		return -1
+	}
+	return lipgloss.Width(haystack[:at])
+}
+
+// switchTo presses tab and drains the resulting load, so the caller is on the
+// other list with keys accepted again. A bare Update leaves the model loading,
+// where every ordinary key including the next tab is ignored.
+func switchTo(t *testing.T, m *model) {
+	t.Helper()
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	drainList(t, m, cmd)
 }

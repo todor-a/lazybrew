@@ -15,6 +15,25 @@ import (
 
 const missingBrewMessage = "Homebrew is not installed or brew is not on PATH"
 
+// noAutoUpdate suppresses Homebrew's own auto-update for every read this package
+// makes. install, outdated, upgrade, bundle, and release are Homebrew's
+// AUTO_UPDATE_COMMANDS, so with HOMEBREW_NO_AUTO_UPDATE unset - the default - the
+// first such call in each HOMEBREW_AUTO_UPDATE_SECS window runs
+// `brew update --auto-update` first: a network fetch that mutates the local
+// Homebrew installation, and only then execs the command that was asked for.
+//
+// Two things follow, and both are unacceptable here. These reads run inside the
+// load that gates first paint, so a launch a day after the last fetch would sit
+// on "Loading casks..." for as long as the network takes. And the auto-update
+// report goes to stdout in the same process, so it lands in the buffer this
+// package parses, where a deleted-formula line - which by construction names an
+// installed package - would be read back as inventory.
+//
+// This application inspects, and uninstalls only on explicit confirmation.
+// Updating the user's Homebrew as a side effect of drawing a list is outside what
+// it promises, so this applies to every read rather than only to outdated.
+const noAutoUpdate = "HOMEBREW_NO_AUTO_UPDATE=1"
+
 var errUnsafeUninstall = errors.New("Unsafe package name; uninstall refused")
 
 // ResolvedCommand is the resolved, exact command boundary used by uninstall.
@@ -48,14 +67,25 @@ func run(ctx context.Context, args []string) ([]byte, []byte, error) {
 	if err != nil {
 		return nil, nil, MapCommandFailure(err, nil, nil)
 	}
+	return runTool(ctx, path, env, args)
+}
 
+// runTool is the one capture/WaitDelay/failure-mapping body, shared by brew and
+// by the size measurement's du so that neither grows a second command runner nor
+// a second failure mapper.
+//
+// A du failure therefore reports du's own stderr, which is what du writes on the
+// only failures that occur in practice: an unreadable or missing root. Only the
+// no-output fallback still words itself as brew, which is preferred over
+// duplicating MapCommandFailure for one message.
+func runTool(ctx context.Context, path string, env, args []string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = env
+	cmd.Env = append(env, noAutoUpdate)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), MapCommandFailure(err, stdout.Bytes(), stderr.Bytes())
 }
 

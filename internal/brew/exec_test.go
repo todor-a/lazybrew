@@ -25,7 +25,52 @@ const (
 	helperPIDEnv           = "LAZYBREW_TEST_BREW_PID_FILE"
 	helperDescendantPIDEnv = "LAZYBREW_TEST_BREW_DESCENDANT_PID_FILE"
 	helperDescendantEnv    = "LAZYBREW_TEST_BREW_DESCENDANT"
+	helperStdoutByArgEnv   = "LAZYBREW_TEST_BREW_STDOUT_BY_ARG"
+	helperFailByArgEnv     = "LAZYBREW_TEST_BREW_FAIL_BY_ARG"
 )
+
+const (
+	recordSeparator = "\x1e"
+	pairSeparator   = "\x1f"
+)
+
+// helperStdout lets one test give different output to each brew invocation of a
+// single operation, selected by an argument that only that invocation carries.
+func helperStdout() string {
+	for _, pair := range strings.Split(os.Getenv(helperStdoutByArgEnv), recordSeparator) {
+		arg, value, ok := strings.Cut(pair, pairSeparator)
+		if ok && slices.Contains(os.Args[1:], arg) {
+			return value
+		}
+	}
+	return os.Getenv(helperStdoutEnv)
+}
+
+// helperFailure lets one test fail a single brew invocation of a multi-call
+// operation, selected by an argument that only that invocation carries. Without
+// it, a test can only fail every invocation, which fails the first one and never
+// reaches the call it meant to exercise.
+func helperFailure() (string, bool) {
+	for _, pair := range strings.Split(os.Getenv(helperFailByArgEnv), recordSeparator) {
+		arg, stderr, ok := strings.Cut(pair, pairSeparator)
+		if ok && slices.Contains(os.Args[1:], arg) {
+			return stderr, true
+		}
+	}
+	return "", false
+}
+
+func appendRecord(path, record string) error {
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.WriteString(record + recordSeparator); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
+}
 
 func TestMain(m *testing.M) {
 	if os.Getenv(helperModeEnv) != "1" {
@@ -37,8 +82,21 @@ func TestMain(m *testing.M) {
 		}
 	}
 	if path := os.Getenv(helperArgsEnv); path != "" {
-		if err := os.WriteFile(path, []byte(strings.Join(os.Args[1:], "\x00")), 0o600); err != nil {
+		// Appended, one record per invocation, so a single operation that shells out
+		// more than once has every one of its argv vectors asserted rather than only
+		// its last.
+		if err := appendRecord(path, strings.Join(os.Args[1:], "\x00")); err != nil {
 			os.Exit(98)
+		}
+		// Recorded beside the argv so a test can assert what the child actually
+		// inherited, not merely what the parent believes it set.
+		if err := os.WriteFile(path+".autoupdate", []byte(os.Getenv("HOMEBREW_NO_AUTO_UPDATE")), 0o600); err != nil {
+			os.Exit(96)
+		}
+		// Recorded beside the argv so a test can assert what the child actually
+		// inherited, not merely what the parent believes it set.
+		if err := os.WriteFile(path+".autoupdate", []byte(os.Getenv("HOMEBREW_NO_AUTO_UPDATE")), 0o600); err != nil {
+			os.Exit(96)
 		}
 	}
 	if path := os.Getenv(helperPIDEnv); path != "" {
@@ -63,8 +121,12 @@ func TestMain(m *testing.M) {
 			time.Sleep(time.Hour)
 		}
 	}
-	_, _ = io.WriteString(os.Stdout, os.Getenv(helperStdoutEnv))
+	_, _ = io.WriteString(os.Stdout, helperStdout())
 	_, _ = io.WriteString(os.Stderr, os.Getenv(helperStderrEnv))
+	if stderr, fail := helperFailure(); fail {
+		_, _ = io.WriteString(os.Stderr, stderr)
+		os.Exit(1)
+	}
 	code, err := strconv.Atoi(os.Getenv(helperExitEnv))
 	if err != nil {
 		os.Exit(96)
@@ -168,6 +230,13 @@ func TestMissingBrewErrors(t *testing.T) {
 			name: "list",
 			run: func() error {
 				_, err := New().List(context.Background(), Cask)
+				return err
+			},
+		},
+		{
+			name: "outdated",
+			run: func() error {
+				_, err := New().Outdated(context.Background(), Cask)
 				return err
 			},
 		},
@@ -325,6 +394,8 @@ func configureFakeBrew(t *testing.T, stdout, stderr string, exitCode int, block 
 	t.Setenv(helperArgsEnv, argsFile)
 	t.Setenv(helperPIDEnv, pidFile)
 	t.Setenv(helperStdoutEnv, stdout)
+	t.Setenv(helperStdoutByArgEnv, "")
+	t.Setenv(helperFailByArgEnv, "")
 	t.Setenv(helperStderrEnv, stderr)
 	t.Setenv(helperExitEnv, strconv.Itoa(exitCode))
 	if block {
@@ -344,19 +415,63 @@ func mustExecutable(t *testing.T) string {
 	return executable
 }
 
-func assertRecordedArgs(t *testing.T, path string, want []string) {
+// assertArgAbsent asserts no invocation carried the given argument. Parsed with
+// the same record split as assertRecordedArgs, so a separator cannot glue the
+// argument onto a neighbouring token and hide it.
+func assertArgAbsent(t *testing.T, path, unwanted string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read recorded args: %v", err)
 	}
-	var got []string
-	if len(data) != 0 {
-		got = strings.Split(string(data), "\x00")
+	for _, record := range strings.Split(string(data), recordSeparator) {
+		if slices.Contains(strings.Split(record, "\x00"), unwanted) {
+			t.Fatalf("argv contains %q, which it must never carry", unwanted)
+		}
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("argv = %#v, want %#v", got, want)
+}
+
+// assertRecordedArgs asserts the complete sequence of brew invocations: one
+// want vector per invocation, in order, and no others.
+func assertRecordedArgs(t *testing.T, path string, want ...[]string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
 	}
+	records := strings.Split(string(data), recordSeparator)
+	records = records[:len(records)-1]
+	if len(records) != len(want) {
+		t.Fatalf("recorded %d brew invocations, want %d: %q", len(records), len(want), records)
+	}
+	for i, record := range records {
+		var got []string
+		if record != "" {
+			got = strings.Split(record, "\x00")
+		}
+		if !slices.Equal(got, want[i]) {
+			t.Fatalf("invocation %d argv = %#v, want %#v", i, got, want[i])
+		}
+	}
+}
+
+// fakeBrewFailByArg fails only the invocation carrying the given argument, with
+// the given stderr, leaving every other invocation of the same operation to
+// succeed.
+func fakeBrewFailByArg(t *testing.T, arg, stderr string) {
+	t.Helper()
+	t.Setenv(helperFailByArgEnv, arg+pairSeparator+stderr)
+}
+
+// fakeBrewStdoutByArg maps a distinguishing argument to the stdout the
+// invocation carrying it should produce.
+func fakeBrewStdoutByArg(t *testing.T, byArg map[string]string) {
+	t.Helper()
+	pairs := make([]string, 0, len(byArg))
+	for arg, value := range byArg {
+		pairs = append(pairs, arg+pairSeparator+value)
+	}
+	t.Setenv(helperStdoutByArgEnv, strings.Join(pairs, recordSeparator))
 }
 
 func fakeExitError(t *testing.T, code int) error {
@@ -392,4 +507,44 @@ func waitForHelperPID(t *testing.T, path string) int {
 	}
 	t.Fatalf("helper did not write PID to %s", path)
 	return 0
+}
+
+// Homebrew auto-updates on install, outdated, upgrade, bundle, and release unless
+// HOMEBREW_NO_AUTO_UPDATE is set, which would run a network fetch that mutates the
+// local installation before the requested command, inside the load that gates
+// first paint, and would put its stdout report into the buffer this package
+// parses. Assert against what the child inherited rather than what run() set.
+func TestReadsSuppressHomebrewAutoUpdateInTheChildEnvironment(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		call func() error
+	}{
+		{"list", func() error { _, err := New().List(context.Background(), Cask); return err }},
+		{"info", func() error {
+			_, err := New().Info(context.Background(), Package{Name: "go", Kind: Formula})
+			return err
+		}},
+		{"uses", func() error {
+			_, err := New().Uses(context.Background(), Package{Name: "go", Kind: Formula})
+			return err
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := configureFakeBrew(t, "", "", 0, false)
+			// Set to the Homebrew default so a pass cannot come from the ambient
+			// environment: this machine's shell exports HOMEBREW_NO_AUTO_UPDATE=1,
+			// which is exactly how the hazard stayed invisible during development.
+			t.Setenv("HOMEBREW_NO_AUTO_UPDATE", "")
+			if err := tt.call(); err != nil {
+				t.Fatalf("call error = %v", err)
+			}
+			got, err := os.ReadFile(argsFile + ".autoupdate")
+			if err != nil {
+				t.Fatalf("child did not record its environment: %v", err)
+			}
+			if string(got) != "1" {
+				t.Fatalf("child HOMEBREW_NO_AUTO_UPDATE = %q, want \"1\"", got)
+			}
+		})
+	}
 }

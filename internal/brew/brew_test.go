@@ -66,15 +66,27 @@ func TestListCommandVectors(t *testing.T) {
 	tests := []struct {
 		name string
 		kind Kind
-		want []string
+		want [][]string
 	}{
-		{name: "cask", kind: Cask, want: []string{"list", "--cask", "-1"}},
-		{name: "formula", kind: Formula, want: []string{"list", "--formula", "--installed-on-request"}},
+		{
+			name: "cask",
+			kind: Cask,
+			want: [][]string{{"list", "--cask", "-1"}},
+		},
+		{
+			name: "formula enumerates every install and then marks dependencies",
+			kind: Formula,
+			want: [][]string{
+				{"list", "--formula"},
+				{"list", "--formula", "--no-installed-on-request"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := configureFakeBrew(t, "alpha 1.0\n", "", 0, false)
+			fakeBrewStdoutByArg(t, map[string]string{"--no-installed-on-request": ""})
 			packages, err := New().List(context.Background(), tt.kind)
 			if err != nil {
 				t.Fatalf("List() error = %v", err)
@@ -82,8 +94,110 @@ func TestListCommandVectors(t *testing.T) {
 			if want := []Package{{Name: "alpha", Version: "1.0", Kind: tt.kind}}; !slices.Equal(packages, want) {
 				t.Fatalf("List() = %#v, want %#v", packages, want)
 			}
-			assertRecordedArgs(t, argsFile, tt.want)
+			assertRecordedArgs(t, argsFile, tt.want...)
 		})
+	}
+}
+
+func TestOutdatedCommandVectors(t *testing.T) {
+	tests := []struct {
+		name string
+		kind Kind
+		want []string
+	}{
+		{name: "cask", kind: Cask, want: []string{"outdated", "--cask", "--quiet"}},
+		{name: "formula", kind: Formula, want: []string{"outdated", "--formula", "--quiet"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := configureFakeBrew(t, "postman\n\nvault\n", "", 0, false)
+			names, err := New().Outdated(context.Background(), tt.kind)
+			if err != nil {
+				t.Fatalf("Outdated() error = %v", err)
+			}
+			if want := []string{"postman", "vault"}; !slices.Equal(names, want) {
+				t.Fatalf("Outdated() = %#v, want %#v", names, want)
+			}
+			assertRecordedArgs(t, argsFile, tt.want)
+			// --greedy would mark an auto-updating cask that brew will not upgrade.
+			// Read back from the recording, not from tt.want: asserting against the
+			// expectation table only fires if someone edits the table, and never
+			// observes the vector the code actually built.
+			assertArgAbsent(t, argsFile, "--greedy")
+		})
+	}
+}
+
+func TestOutdatedRefusesAnInvalidKindWithoutStartingBrew(t *testing.T) {
+	argsFile := configureFakeBrew(t, "must not run", "", 0, false)
+	if _, err := New().Outdated(context.Background(), Kind("other")); err == nil {
+		t.Error("Outdated() accepted invalid kind")
+	}
+	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid kind started brew; marker error = %v", err)
+	}
+}
+
+// The measured machine reports 116 formulae on request and 180 not on request
+// out of 304 installed, so eight explicitly requested third-party-tap formulae
+// appear under neither filter. Enumerating the unfiltered list and using
+// `--no-installed-on-request` only as a marker is what keeps those eight visible.
+func TestFormulaListMarksOnlyTheReportedDependencySet(t *testing.T) {
+	// The enumeration uses the default stdout; only the marker call is keyed, so
+	// the argument selecting it is unique to that invocation.
+	argsFile := configureFakeBrew(t, "onrequest\ndependency\ntapinstall\n", "", 0, false)
+	fakeBrewStdoutByArg(t, map[string]string{"--no-installed-on-request": "dependency\n"})
+
+	packages, err := New().List(context.Background(), Formula)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	want := []Package{
+		{Name: "onrequest", Kind: Formula},
+		{Name: "dependency", Kind: Formula, Dependency: true},
+		{Name: "tapinstall", Kind: Formula},
+	}
+	if !slices.Equal(packages, want) {
+		t.Fatalf("List() = %#v, want %#v", packages, want)
+	}
+	assertRecordedArgs(t, argsFile,
+		[]string{"list", "--formula"},
+		[]string{"list", "--formula", "--no-installed-on-request"},
+	)
+}
+
+// The marker call is load-bearing for every formula list load: its failure fails
+// the whole load rather than degrading to an unmarked list, because a silently
+// unmarked list would show every dependency as installed on request. Failing only
+// that invocation is the point - failing every invocation fails the enumeration
+// first and never reaches the marker call at all.
+func TestFormulaListFailsWhenTheDependencyMarkerCallFails(t *testing.T) {
+	argsFile := configureFakeBrew(t, "onrequest\n", "", 0, false)
+	fakeBrewFailByArg(t, "--no-installed-on-request", "Error: invalid option: --no-installed-on-request")
+
+	packages, err := New().List(context.Background(), Formula)
+	if err == nil || err.Error() != "Error: invalid option: --no-installed-on-request" {
+		t.Fatalf("List() error = %v, want the mapped marker failure", err)
+	}
+	if packages != nil {
+		t.Fatalf("List() returned %#v with a failed marker call, want no packages", packages)
+	}
+	// Both invocations ran: the enumeration succeeded and the marker call is the
+	// one that failed.
+	assertRecordedArgs(t, argsFile,
+		[]string{"list", "--formula"},
+		[]string{"list", "--formula", "--no-installed-on-request"})
+}
+
+func TestCaskListNeverReportsADependency(t *testing.T) {
+	configureFakeBrew(t, "firefox\n", "", 0, false)
+	packages, err := New().List(context.Background(), Cask)
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(packages) != 1 || packages[0].Dependency {
+		t.Fatalf("List() = %#v, want one cask that is not a dependency", packages)
 	}
 }
 
