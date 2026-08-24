@@ -83,6 +83,12 @@ go build -o lazybrew ./cmd/lazybrew   # Go 1.27
 go test ./...
 ```
 
+The opt-in black-box suite drives the compiled TUI through a real macOS PTY and real Homebrew. It creates only the uniquely named `lazybrew/e2e` tap and `lazybrew-e2e-*` packages, then removes them:
+
+```sh
+go test -count=1 -tags=e2e ./e2e
+```
+
 Run via `go run ./cmd/lazybrew` and the log at `~/lazybrew/lazybrew.log` switches to debug — JSON lines with every brew command and its duration. The demo GIF and theme screenshots are recorded with [vhs](https://github.com/charmbracelet/vhs) from the tapes in `.github/`.
 
 <details>

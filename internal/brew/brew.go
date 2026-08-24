@@ -222,7 +222,11 @@ func parseOutdated(raw []byte, kind Kind) ([]OutdatedPackage, error) {
 	}
 	packages := make([]OutdatedPackage, 0, len(rows))
 	for _, row := range rows {
-		if row.Name == "" {
+		name := row.Name
+		if slash := strings.LastIndexByte(name, '/'); slash >= 0 {
+			name = name[slash+1:]
+		}
+		if name == "" {
 			continue
 		}
 		installed := ""
@@ -231,7 +235,7 @@ func parseOutdated(raw []byte, kind Kind) ([]OutdatedPackage, error) {
 			// an upgrade replaces.
 			installed = row.InstalledVersions[len(row.InstalledVersions)-1]
 		}
-		packages = append(packages, OutdatedPackage{Name: row.Name, Installed: installed, Latest: row.CurrentVersion})
+		packages = append(packages, OutdatedPackage{Name: name, Installed: installed, Latest: row.CurrentVersion})
 	}
 	return packages, nil
 }
