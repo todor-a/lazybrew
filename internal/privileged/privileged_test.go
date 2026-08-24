@@ -1,4 +1,4 @@
-package uninstall
+package privileged
 
 import (
 	"bytes"
@@ -31,14 +31,14 @@ func TestStartSetupFailureIsMapped(t *testing.T) {
 	createPrivateEndpoint = func() (*privateEndpoint, error) { return nil, errors.New("listener unavailable") }
 	t.Cleanup(func() { createPrivateEndpoint = old })
 
-	_, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	_, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err == nil || err.Error() != "Could not start uninstall: listener unavailable" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestStartPreparationFailureCleansEndpoint(t *testing.T) {
-	oldPrepare := prepareUninstall
+	oldPrepare := prepareCommand
 	var endpoint *privateEndpoint
 	oldEndpoint := createPrivateEndpoint
 	createPrivateEndpoint = func() (*privateEndpoint, error) {
@@ -46,15 +46,15 @@ func TestStartPreparationFailureCleansEndpoint(t *testing.T) {
 		endpoint, err = createEndpoint()
 		return endpoint, err
 	}
-	prepareUninstall = func([]string, brew.Package) (brew.ResolvedCommand, error) {
+	prepareCommand = func([]string, brew.Operation, brew.Package) (brew.ResolvedCommand, error) {
 		return brew.ResolvedCommand{}, errors.New("prepare failed")
 	}
 	t.Cleanup(func() {
-		prepareUninstall = oldPrepare
+		prepareCommand = oldPrepare
 		createPrivateEndpoint = oldEndpoint
 	})
 
-	_, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	_, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err == nil || err.Error() != "prepare failed" {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestStartEnvironmentAndChildFailuresCleanEndpoint(t *testing.T) {
 			return endpoint, err
 		}
 		t.Cleanup(func() { createPrivateEndpoint = oldEndpoint })
-		_, err := (&uninstaller{}).Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+		_, err := (&runner{}).Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 		if err == nil || !strings.HasPrefix(err.Error(), "Could not start uninstall: ") {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -88,20 +88,20 @@ func TestStartEnvironmentAndChildFailuresCleanEndpoint(t *testing.T) {
 	t.Run("child start", func(t *testing.T) {
 		var endpoint *privateEndpoint
 		oldEndpoint := createPrivateEndpoint
-		oldPrepare := prepareUninstall
+		oldPrepare := prepareCommand
 		createPrivateEndpoint = func() (*privateEndpoint, error) {
 			var err error
 			endpoint, err = createEndpoint()
 			return endpoint, err
 		}
-		prepareUninstall = func([]string, brew.Package) (brew.ResolvedCommand, error) {
+		prepareCommand = func([]string, brew.Operation, brew.Package) (brew.ResolvedCommand, error) {
 			return brew.ResolvedCommand{Path: "/definitely/missing/lazybrew-brew"}, nil
 		}
 		t.Cleanup(func() {
 			createPrivateEndpoint = oldEndpoint
-			prepareUninstall = oldPrepare
+			prepareCommand = oldPrepare
 		})
-		_, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+		_, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 		if err == nil || err.Error() != "Homebrew is not installed or brew is not on PATH" {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -114,7 +114,7 @@ func TestStartEnvironmentAndChildFailuresCleanEndpoint(t *testing.T) {
 func TestJobSuccessFailureAndIdempotentWait(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		installFakeBrew(t, "exit 0")
-		startedJob, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+		startedJob, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -148,7 +148,7 @@ func TestJobSuccessFailureAndIdempotentWait(t *testing.T) {
 
 	t.Run("command failure", func(t *testing.T) {
 		installFakeBrew(t, "echo refused >&2\nexit 7")
-		job, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Formula})
+		job, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Formula})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,7 +189,7 @@ func receivePasswordEvent(t *testing.T, job Job) Event {
 func TestAuthenticatedRequestsAreOnDemandAndFresh(t *testing.T) {
 	trustPeerForTest(t)
 	installFakeBrew(t, "/bin/sleep 30")
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestAuthenticationRejectionAndTimeoutCancelJob(t *testing.T) {
 		}
 		verifyEvidence = func(peerEvidence) error { return errAuthentication }
 		t.Cleanup(func() { acquireEvidence, verifyEvidence = oldAcquire, oldVerify })
-		started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+		started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -271,7 +271,7 @@ func TestAuthenticationRejectionAndTimeoutCancelJob(t *testing.T) {
 		authenticationTimeout = 20 * time.Millisecond
 		t.Cleanup(func() { authenticationTimeout = oldTimeout })
 		installFakeBrew(t, "/bin/sleep 30")
-		started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+		started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -296,7 +296,7 @@ func TestAuthenticationRejectionAndTimeoutCancelJob(t *testing.T) {
 
 func TestJobCancelIsBoundedAndIdempotent(t *testing.T) {
 	installFakeBrew(t, "trap '' TERM\nwhile :; do /bin/sleep 1; done")
-	job, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	job, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestCleanupAmbiguityIsExplicit(t *testing.T) {
 	observeTrackedGroupGone = func(int, time.Duration) bool { return false }
 	t.Cleanup(func() { observeTrackedGroupGone = oldObserve })
 	installFakeBrew(t, "/bin/sleep 30")
-	job, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	job, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestFatalCleanupIsBoundedWhenCompletionSignalsAreWithheld(t *testing.T) {
 			withhold: func() {
 				notifyWorkersDone = func(chan struct{}) {}
 			},
-			want: "uninstall workers did not stop before cleanup deadline",
+			want: "workers did not stop before cleanup deadline",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,7 +365,7 @@ func TestFatalCleanupIsBoundedWhenCompletionSignalsAreWithheld(t *testing.T) {
 			})
 
 			installFakeBrew(t, "trap '' TERM\nexec /bin/sleep 30")
-			started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+			started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -390,7 +390,7 @@ func TestFatalCleanupIsBoundedWhenCompletionSignalsAreWithheld(t *testing.T) {
 				if result.CleanupErr == nil || !strings.Contains(result.CleanupErr.Error(), tc.want) {
 					t.Fatalf("missing explicit fatal cleanup result: %+v", result)
 				}
-				if !strings.HasPrefix(result.CleanupErr.Error(), "fatal uninstall cleanup failure:") {
+				if !strings.HasPrefix(result.CleanupErr.Error(), "fatal cleanup failure:") {
 					t.Fatalf("cleanup failure is not marked fatal: %v", result.CleanupErr)
 				}
 			case <-time.After(time.Second):
@@ -422,7 +422,7 @@ func TestGroupSignalFailureIsFatalButDirectChildIsKilledAndWaited(t *testing.T) 
 	})
 
 	installFakeBrew(t, "trap '' TERM\nwhile :; do /bin/sleep 1; done")
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Formula})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Formula})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestDisableCoreDumpsFailureIsRemembered(t *testing.T) {
 	if DisableCoreDumps() == nil {
 		t.Fatal("core-limit failure ignored")
 	}
-	u := New().(*uninstaller)
+	u := New().(*runner)
 	if u.authenticationCapabilityError() == nil {
 		t.Fatal("authentication remained enabled")
 	}
@@ -506,15 +506,15 @@ func TestDisableCoreDumpsFailureIsRemembered(t *testing.T) {
 
 func TestStartUsesCanonicalEnvironmentAndWaitDelay(t *testing.T) {
 	installFakeBrew(t, "/bin/sleep 30")
-	oldPrepare := prepareUninstall
+	oldPrepare := prepareCommand
 	var captured []string
-	prepareUninstall = func(env []string, pkg brew.Package) (brew.ResolvedCommand, error) {
+	prepareCommand = func(env []string, op brew.Operation, pkg brew.Package) (brew.ResolvedCommand, error) {
 		captured = append([]string(nil), env...)
-		return brew.PrepareUninstall(env, pkg)
+		return brew.PrepareCommand(env, op, pkg)
 	}
-	t.Cleanup(func() { prepareUninstall = oldPrepare })
+	t.Cleanup(func() { prepareCommand = oldPrepare })
 
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -546,7 +546,7 @@ func TestDirectChildWaitIsOwnedExactlyOnce(t *testing.T) {
 	}
 	t.Cleanup(func() { waitCommand = oldWait })
 
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Formula})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Formula})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +629,7 @@ func TestAuthenticatedPeerDeathFailsPromptly(t *testing.T) {
 		peerStillAuthenticated, peerCheckInterval = oldPeer, oldInterval
 	})
 
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -658,7 +658,7 @@ func TestAuthenticatedPeerDeathFailsPromptly(t *testing.T) {
 func TestInheritedDescriptorCannotHoldDirectWait(t *testing.T) {
 	installFakeBrew(t, "(trap '' TERM; /bin/sleep 30) &\nexit 0")
 	startedAt := time.Now()
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,7 +707,7 @@ func TestCleanupWaitsForBothMaximumProcessGroupPhases(t *testing.T) {
 		notifyChildDone = oldChildDone
 	})
 	installFakeBrew(t, "trap '' TERM\nexec /bin/sleep 30")
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Formula})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Formula})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -746,7 +746,7 @@ func TestCleanupWaitsForBothMaximumProcessGroupPhases(t *testing.T) {
 	if result.CleanupErr == nil {
 		t.Fatal("surviving group was not reported")
 	}
-	if !strings.HasPrefix(result.CleanupErr.Error(), "fatal uninstall cleanup failure:") {
+	if !strings.HasPrefix(result.CleanupErr.Error(), "fatal cleanup failure:") {
 		t.Fatalf("cleanup failure is not marked fatal: %v", result.CleanupErr)
 	}
 }
@@ -801,7 +801,7 @@ func TestCleanupFinalObservationWaitsForDirectChildCompletion(t *testing.T) {
 		notifyChildDone = oldChildDone
 	})
 	installFakeBrew(t, "trap '' TERM\nexec /bin/sleep 30")
-	started, err := New().Start(context.Background(), brew.Package{Name: "safe", Kind: brew.Cask})
+	started, err := New().Start(context.Background(), brew.Uninstall, brew.Package{Name: "safe", Kind: brew.Cask})
 	if err != nil {
 		t.Fatal(err)
 	}

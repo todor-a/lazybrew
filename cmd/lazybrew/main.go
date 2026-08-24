@@ -19,19 +19,19 @@ import (
 
 	"lazybrew/internal/brew"
 	"lazybrew/internal/info"
+	"lazybrew/internal/privileged"
 	"lazybrew/internal/ui"
-	"lazybrew/internal/uninstall"
 )
 
 func main() { os.Exit(run()) }
 
 func run() int {
-	if handled, exitCode := uninstall.RunHelperFromEnv(); handled {
+	if handled, exitCode := privileged.RunHelperFromEnv(); handled {
 		return exitCode
 	}
 
 	// New remembers this failure and refuses authenticated requests while browsing remains available.
-	_ = uninstall.DisableCoreDumps()
+	_ = privileged.DisableCoreDumps()
 	if !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
 		fmt.Fprintln(os.Stderr, "lazybrew requires an interactive terminal")
 		return 1
@@ -39,8 +39,8 @@ func run() int {
 
 	homebrew := brew.New()
 	loader := info.New(info.Details(homebrew.Info, homebrew.Uses))
-	uninstaller := uninstall.New()
-	root, supervisor := ui.New(homebrew, loader, uninstaller)
+	runner := privileged.New()
+	root, supervisor := ui.New(homebrew, loader, runner)
 	program := tea.NewProgram(root, tea.WithoutSignalHandler())
 
 	signals := make(chan os.Signal, 1)

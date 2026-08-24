@@ -1,6 +1,10 @@
 package ui
 
-import "charm.land/bubbles/v2/key"
+import (
+	"charm.land/bubbles/v2/key"
+
+	"lazybrew/internal/brew"
+)
 
 type footerKeys []key.Binding
 
@@ -21,8 +25,9 @@ var (
 	normalHelp = footerKeys{
 		key.NewBinding(key.WithKeys("/", "s", "S"), key.WithHelp("Search:", "/")),
 		key.NewBinding(key.WithKeys("tab"), key.WithHelp("Switch:", "tab")),
-		key.NewBinding(key.WithKeys("u", "U"), key.WithHelp("Uninstall:", "u")),
-		key.NewBinding(key.WithKeys("d", "D"), key.WithHelp("Deps:", "d")),
+		key.NewBinding(key.WithKeys("d", "D"), key.WithHelp("Uninstall:", "d")),
+		key.NewBinding(key.WithKeys("u", "U"), key.WithHelp("Upgrade:", "u")),
+		key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("All:", "a")),
 		key.NewBinding(key.WithKeys("o", "O"), key.WithHelp("Sort:", "o")),
 		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("Theme:", "t")),
 		key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("Refresh:", "r")),
@@ -35,10 +40,20 @@ var (
 	loadingHelp = footerKeys{
 		key.NewBinding(key.WithKeys("q", "Q"), key.WithHelp("Quit:", "q")),
 	}
-	progressHelp = footerKeys{
-		key.NewBinding(key.WithKeys("__progress_help__"), key.WithHelp("Uninstall in progress;", "controls disabled")),
-	}
+
 	cleanupHelp = footerKeys{
 		key.NewBinding(key.WithKeys("__cleanup_help__"), key.WithHelp("Cleanup in progress;", "controls disabled")),
 	}
 )
+
+// progressHelp names the verb actually running. A frozen-controls footer that
+// says the wrong verb is worse than one that says none, and the operation is
+// already carried immutably beside the confirmation snapshot.
+func progressHelp(op brew.Operation) footerKeys {
+	return footerKeys{
+		key.NewBinding(
+			key.WithKeys("__progress_help__"),
+			key.WithHelp(words(op).title+" in progress;", "controls disabled"),
+		),
+	}
+}

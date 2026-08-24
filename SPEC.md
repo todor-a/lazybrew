@@ -21,12 +21,11 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 ### Non-goals
 
 - Supporting Linux, Windows, package managers other than Homebrew, or remote Homebrew installations.
-- Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package. **[REWRITE ADDITION]** Reporting which packages `brew outdated` names is a read and is not covered by this non-goal; the app surfaces the fact and takes no action on it. Section 9A designs an upgrade action but does not implement one, and this non-goal is amended only by the increment that implements it.
+- Installing, pinning, or otherwise mutating packages except uninstalling or upgrading the explicitly confirmed package. **[REWRITE ADDITION]** Amended, as its previous wording said it would be, by the increment that implemented section 9A: upgrading a confirmed package is now permitted and is the only mutation besides uninstalling. Both go through one confirmation, one snapshot, and one privileged path. Reporting which packages `brew outdated` names remains a read.
 - Listing formulae installed only as dependencies.
-- Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package.
-- **[REWRITE ADDITION]** Installing, upgrading, or pinning dependency-only formulae. Replaces the non-goal `Listing formulae installed only as dependencies.`, which forbade the only view that can answer what is consuming disk: on the measured machine the dependency-only set is 180 of 304 installed formulae and holds 7 of the 12 largest packages, including the single largest at 1.5 GB. Dependency-only formulae are now listed behind an explicit toggle that is off at startup (section 4), so the curated default view is unchanged.
+- **[REWRITE ADDITION]** Installing or pinning dependency-only formulae. Replaces the non-goal `Listing formulae installed only as dependencies.`, which forbade the only view that can answer what is consuming disk: on the measured machine the dependency-only set is 180 of 304 installed formulae and holds 7 of the 12 largest packages, including the single largest at 1.5 GB. Dependency-only formulae are now listed behind an explicit toggle that is off at startup (section 4), so the curated default view is unchanged.
 
-  This expands the destructive surface and the non-goal must not be read as shielding those rows. With the toggle on, a revealed dependency row is an ordinary `u` target like any other: nothing in this application refuses it. The only guards are Homebrew's own refusal to remove a formula another formula needs, and the info pane's `Removing this breaks <n> installed formula(e).` verdict, which is advisory and is withheld entirely when the dependents lookup fails.
+  This expands the destructive surface and the non-goal must not be read as shielding those rows. With the toggle on, a revealed dependency row is an ordinary `d` target like any other: nothing in this application refuses it. The only guards are Homebrew's own refusal to remove a formula another formula needs, and the info pane's `Removing this breaks <n> installed formula(e).` verdict, which is advisory and is withheld entirely when the dependents lookup fails.
 - Pre-authenticating with `sudo -v` or prompting for a password before Homebrew asks for one.
 - Caching or reusing administrator passwords.
 - Parsing a pseudo-terminal, scraping a sudo prompt, using `sudo -S`, or suspending the TUI for terminal authentication.
@@ -95,10 +94,11 @@ Key handling is mode-first. A modal mode receives ordinary keys before the under
 | `down`, `j` | Move selection down one visible row. Clamp at the last row; never wrap. | **[CURRENT/PARITY]** |
 | `/`, `s`, `S` | Enter search-edit mode with the current query. | **[CURRENT/PARITY]** |
 | `tab` | Switch cask ↔ formula, reset selection and scroll offset to zero, load that kind from the section 8 list cache or from `brew list` on a miss, then target its selected package for info. The query remains active, so the target list arrives already filtered. | **[CURRENT/PARITY]** plus cache **[REWRITE ADDITION]** |
-| `u`, `U` | Open confirmation for the selected package if one exists and the safety-fit check passes. With no selected package, do nothing. | **[CURRENT/PARITY]** plus centered dialog **[REWRITE ADDITION]** |
+| `d`, `D` | Open the **uninstall** confirmation for the selected package if one exists and the safety-fit check passes. With no selected package, do nothing. | **[CURRENT/PARITY]** behaviour, **[REWRITE ADDITION]** key |
+| `u`, `U` | Open the **upgrade** confirmation, but only for a package `brew outdated` reports. On a package it does not report, start nothing at all — no confirmation, no snapshot, no job — and set the ordinary status `<name> is up to date`. With no selected package, do nothing. | **[REWRITE ADDITION]** |
 | `t`, `T` | Cycle to the next theme and set status to `Theme: <name>`. | **[CURRENT/PARITY]** |
 | `r`, `R` | Perform the refresh contract in section 8. | **[CURRENT/PARITY]** |
-| `d`, `D` | Toggle dependency-only formulae into and out of the formula list, resetting selection to the first row, and set status to `Dependencies: shown` / `Dependencies: hidden`. Served from the section 8 list cache: it starts no command and enters no loading state. On the cask list only the status changes and selection is preserved, because casks have no dependency relation — the flag still flips, so the key is never silently dead and a later `tab` lands in the requested state. | **[REWRITE ADDITION]** |
+| `a`, `A` | Toggle **all** formulae, dependency-only ones included, into and out of the formula list, resetting selection to the first row, and set status to `Dependencies: shown` / `Dependencies: hidden`. Served from the section 8 list cache: it starts no command and enters no loading state. On the cask list only the status changes and selection is preserved, because casks have no dependency relation — the flag still flips, so the key is never silently dead and a later `tab` lands in the requested state. | **[REWRITE ADDITION]** |
 | `o`, `O` | Toggle row order between source order and installed size, largest first, resetting selection to the first row, and set status to `Sort: size` / `Sort: name`. Also served from the list cache with no command. A no-op on order until the section 5 size pass lands, at which point the requested order is applied. | **[REWRITE ADDITION]** |
 | `q`, `Q` | Cleanly quit with status 0. | **[CURRENT/PARITY]** |
 
@@ -166,6 +166,8 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | Info | formula | `brew`, `info`, `--formula`, `<name>` |
 | Uninstall | cask | `brew`, `uninstall`, `--cask`, `<confirmed-name>` |
 | Uninstall | formula | `brew`, `uninstall`, `--formula`, `<confirmed-name>` |
+| Upgrade **[REWRITE ADDITION]** | cask | `brew`, `upgrade`, `--cask`, `<confirmed-name>` |
+| Upgrade **[REWRITE ADDITION]** | formula | `brew`, `upgrade`, `--formula`, `<confirmed-name>` |
 | Dependents **[REWRITE ADDITION]** | formula | `brew`, `uses`, `--installed`, `<name>` |
 | Outdated **[REWRITE ADDITION]** | cask | `brew`, `outdated`, `--cask`, `--quiet` |
 | Outdated **[REWRITE ADDITION]** | formula | `brew`, `outdated`, `--formula`, `--quiet` |
@@ -271,7 +273,7 @@ Do not use Huh or another modal package. `View` is pure: it renders state and mu
 6. One status row.
 7. One footer/help row.
 
-The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: u | Deps: d | Sort: o | Theme: t | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels.
+The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels.
 
 **[REWRITE ADDITION]** The action leads and the key answers it, joined by ` | `, replacing parity's key-first `<key> <label>` pairs separated by two spaces. A footer is read by someone looking for a verb, not by someone scanning single letters. `Search:` advertises `/` alone; `s` and `S` still work and are still bound, they are simply not spelled out.
 
@@ -279,7 +281,7 @@ The label occupies each binding's help-key slot and the keystroke its descriptio
 
 The footer is two-tone: the action in the footer role, the keystroke bold, the separator faint. Every segment carries the complete role rather than relying on an enclosing style, and the trailing pad is rendered through that role too. A single enclosing style over pre-styled segments ends its own background at the first inner reset, which is visible as a bare strip on any theme whose footer has a background.
 
-Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `Search: / | Switch: tab | Unin`: the clip falls inside `Uninstall:`. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
+Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `Search: / | Switch: tab | Unin`: the clip falls inside `Uninstall:`. **[REWRITE ADDITION]** Rebinding uninstall to `d` and adding `Upgrade: u` and `All: a` left this prefix untouched, because `Uninstall:` stayed third; that is the constraint the ordering exists to satisfy. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
 Package rows render a selection marker, a freshness cell, name, kind, and optional version. **[REWRITE ADDITION]** The row shape is ` <marker><freshness> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row and `<freshness>` is one fixed cell holding `↑` for a package `brew outdated` reports and a space otherwise. This replaces the earlier ` <marker> <name-column> <kind>[ <version>]`, which had no cell for the outdated verdict. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
 
@@ -516,14 +518,14 @@ Those figures hold only because the adapter suppresses Homebrew's auto-update; s
 
 Map presence is the retention test, not list length. A kind with nothing installed is retained as an empty list and is a hit, rather than re-shelling on every switch.
 
-Retention is dropped wholesale — both kinds — at exactly the two sites that already drop the info cache, and only there:
+Retention is dropped wholesale — both kinds — at exactly the two sites that already drop the info cache, and only there. **[REWRITE ADDITION]** The second site is reached by either privileged verb: the committed-operation reload is one shared code path, so implementing upgrade added no third site. A third call site would mean a forked state machine, which is what generalising the seam exists to prevent.
 
 1. `r` or `R` refresh, per the section 8 refresh contract. Refresh means the inventory may have changed outside the app, so no kind stays trusted.
-2. A committed uninstall, before its `loadAfterUninstall` reload starts. Uninstalling one kind can change the other, so both are dropped rather than reasoning about which.
+2. A committed uninstall **or upgrade**, before its `loadAfterOperation` reload starts. Mutating one kind can change the other, so both are dropped rather than reasoning about which.
 
 The info cache and the list cache are invalidated together at both sites and must stay that way: anything that can change what `brew info` prints can change what `brew list` prints. After either site the reload repopulates only the active kind, so the next switch is a miss and re-lists.
 
-**[REWRITE ADDITION]** The section 5 size map is a third cache dropped at exactly those same two sites and only there, for the same reason: anything that can change what `brew list` prints can change what the Cellar weighs. The invalidation function returns the command that restarts the size pass, so both sites restart it in lockstep by construction rather than by each remembering to. A kind switch and the `d`/`o` toggles are explicitly not invalidation sites — they change the view, not the inventory — and must not remeasure. A failed size pass caches nothing, mirroring the rule that a failed list result caches nothing; it also does not discard a previous good measurement.
+**[REWRITE ADDITION]** The section 5 size map is a third cache dropped at exactly those same two sites and only there, for the same reason: anything that can change what `brew list` prints can change what the Cellar weighs. The invalidation function returns the command that restarts the size pass, so both sites restart it in lockstep by construction rather than by each remembering to. A kind switch and the `a`/`o` toggles are explicitly not invalidation sites — they change the view, not the inventory — and must not remeasure. A failed size pass caches nothing, mirroring the rule that a failed list result caches nothing; it also does not discard a previous good measurement.
 
 Retention is per session and is not revalidated. An install or uninstall performed in another terminal is not observed until `r`. Parity's per-switch re-list masked that, at the cost of the empty pane on every switch; `r` is the explicit remedy.
 
@@ -541,7 +543,7 @@ The key, priority-status, and footer contracts while a list command is active ar
 |---|---|---|---|
 | Startup cask load | `Loading casks...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Kind-switch load | `Loading casks...` or `Loading formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: u | Deps: d | Sort: o | Theme: t | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
+| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
 | User refresh | `Refreshing casks...` or `Refreshing formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Post-uninstall reload | `Reloading casks...` or `Reloading formulae...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
 
@@ -561,7 +563,7 @@ Confirmation state is cleared before the starting-uninstall transition is commit
 
 1. Revalidate the immutable snapshot and size safety.
 2. Clear confirmation, create and retain the operation context/cancel function, commit `starting-uninstall` state with priority status `Uninstalling <name>...`, and activate the spinner.
-3. Return a non-secret `tea.Cmd` that calls synchronous `Uninstaller.Start(context, snapshot)`. `Start` must never execute inside `Update`.
+3. Return a non-secret `tea.Cmd` that calls synchronous `Runner.Start(context, operation, snapshot)`. `Start` must never execute inside `Update`.
 4. Inside `Start`, create and validate the private askpass directory and listener, start accepting only after the listener is bound and ready, construct the canonical per-child environment, use the brew preparation seam in section 12 with that environment, and only then start the exact uninstall argv in its dedicated tracked process group.
 5. The command returns `jobStartedMsg{job}` only after the job owns the started child and broker resources, or `jobStartFailedMsg{err}` only after every partially created owned resource has been cleaned. Neither message contains a secret.
 6. Handling `jobStartedMsg` retains uninstall-progress state and starts the job event/result commands. Handling `jobStartFailedMsg` stops the spinner, clears the operation, and returns to normal mode with the mapped failure.
@@ -582,19 +584,15 @@ The starting-uninstall state is committed and renderable before the returned com
 
 **[CURRENT/PARITY]** Success is observable only after both `brew uninstall` and the active list reload succeed.
 
-## 9A. Upgrade — designed, not implemented
+## 9A. Upgrade
 
-**[REWRITE ADDITION]** This section is a design, not a shipped contract. No code implements it. Nothing in sections 1 through 9 or 10 through 17 describes upgrade behaviour, the `g` key does not exist, the footer string is unchanged, and section 2's non-goal against mutating packages other than by uninstalling still holds exactly as written. That non-goal is amended only by the increment that implements this section; until then it is correct as it stands.
+**[REWRITE ADDITION]** Implemented. This section was a design; the increment that shipped it amended section 2's mutation non-goal, section 4's key table, section 5's argv table, section 6's footer, and section 12's file list and singular-seam rule, all in the same change.
 
-It is written down for one reason: `brew upgrade` on a cask can require administrator authentication exactly as `brew uninstall` can, so an upgrade action needs the whole `internal/uninstall` machinery — private askpass endpoint, kernel peer authentication, tracked process group, bounded cleanup, immutable confirmation snapshot. That machinery must be generalised, never forked, copied, or bypassed. A second copy of the security path would be a worse outcome than no upgrade action at all. The generalisation below was checked against the implementation; it is small, and the reason for deferring it is entirely in `internal/ui`.
+`brew upgrade` on a cask can require administrator authentication exactly as `brew uninstall` can, so the upgrade action reuses the whole `internal/privileged` machinery — private askpass endpoint, kernel peer authentication, tracked process group, bounded cleanup, immutable confirmation snapshot. That machinery was generalised, never forked. A second copy of the security path would have been a worse outcome than no upgrade action at all.
 
-### What is already operation-agnostic
+### One seam, two verbs
 
-The security core carries nothing uninstall-specific: the endpoint, the framed protocol, peer authentication, process-group ownership, bounded cleanup, and the `Job` contract are all indifferent to which brew verb runs. The single seam that produces the argv is already a package-level test seam in `internal/uninstall`. Generalisation is therefore a signature change plus a rename, not a redesign of anything in sections 10, 11, or 13.
-
-### `internal/brew`: one more verb through the same seam
-
-`PrepareUninstall(env, pkg)` becomes `PrepareCommand(env, op, pkg)` with:
+`brew.PrepareUninstall(env, pkg)` became `brew.PrepareCommand(env, op, pkg)`:
 
 ```go
 type Operation uint8
@@ -604,34 +602,27 @@ const (
     Upgrade
 )
 
+func (o Operation) Verb() string
 func PrepareCommand(env []string, op Operation, pkg Package) (ResolvedCommand, error)
 ```
 
-Two argv rows join the section 5 table:
+`Verb()` returns the brew subcommand, and is also the word every user-facing string is built from, so the argv and the wording cannot disagree about which operation is running. An operation outside the two constants is rejected before anything else, and the unsafe-name refusal is per operation — `Unsafe package name; uninstall refused` or `Unsafe package name; upgrade refused` — still starting no process.
 
-| Operation | Kind | argv |
-|---|---|---|
-| Upgrade | cask | `brew`, `upgrade`, `--cask`, `<confirmed-name>` |
-| Upgrade | formula | `brew`, `upgrade`, `--formula`, `<confirmed-name>` |
-
-The section 12 rule is restated **stronger**, not weakened: no second package validator, **command** argv builder, executable resolver, or command-failure mapper may exist. Dropping the word "uninstall" widens the rule's scope while keeping it singular — one validator, one resolver, one argv builder, one failure mapper, now covering two verbs. The unsafe-name rejection text becomes per-operation, `Unsafe package name; uninstall refused` or `Unsafe package name; upgrade refused`, and still starts no process.
+The section 12 rule is restated **stronger**, not weakened: no second package validator, command argv builder, executable resolver, or command-failure mapper may exist, for either verb. Dropping the word "uninstall" widened the rule's scope while keeping it singular.
 
 ### `internal/uninstall` → `internal/privileged`
 
-The package is renamed, because a package named for one verb cannot honestly own two:
+A package named for one verb cannot honestly own two. `Uninstaller` became `Runner`, `Start(ctx, pkg)` became `Start(ctx, brew.Operation, brew.Package)`, and three error strings lost the verb: `Could not start %s: %w` now takes it, while `fatal cleanup failure` and `workers did not stop before cleanup deadline` no longer name one. `Job`, `Event`, `Result`, `RequestID`, the helper dispatch, and every invariant in sections 10, 11, and 13 are untouched.
 
-- `internal/uninstall` → `internal/privileged`; the section 12 planned-file list becomes `internal/privileged/privileged.go`, `internal/privileged/protocol.go`, `internal/privileged/peer_darwin.go`, `internal/privileged/*_test.go`, replacing the four `internal/uninstall/*` entries.
-- `Uninstaller` → `Runner`; `Start(ctx, pkg)` → `Start(ctx, brew.Operation, brew.Package)`, with the operation passed straight through to the existing prepare seam.
-- Three error strings lose the verb: `Could not start uninstall: %w` → `Could not start %s: %w`; `fatal uninstall cleanup failure` → `fatal cleanup failure`; `uninstall workers did not stop before cleanup deadline` → `workers did not stop before cleanup deadline`.
-- Nothing else in the package changes. `Job`, `Event`, `Result`, `RequestID`, the helper dispatch, and every invariant in sections 10, 11, and 13 are untouched.
+The rename touched every file of a security-critical package, where silently dropping a test file or one of its package-level `var` seams is the highest-consequence mistake available in this repository: a seam that stops being overridden still compiles, still vets, and still passes. The increment therefore verified it file by file. Recorded so a future rename repeats the check: **19 seams**, with override counts unchanged before and after, and **37 tests** across three test files, unchanged. `prepareUninstall` → `prepareCommand` was the only seam renamed.
 
-The rename and the signature change must land in the **same** increment, so no half-generalised state ships. The rename touches every file of a security-critical package, which makes silently dropping a test file or one of its package-level `var` test seams the highest-consequence mistake available in this repository: a seam that stops being overridden still compiles, still vets, and still passes. The increment must therefore verify, file by file, that every test file and every seam survives with the same override sites.
+The same argument renamed the identifiers in `internal/ui` that had come to cover both verbs: the model's runner field, `finishOperation`, `loadAfterOperation`, and `modeOperation`.
 
-### `internal/ui`: the actual cost
+### Per-operation strings
 
-The model gains the operation alongside its existing snapshot, and about ten SPEC-pinned strings become per-operation:
+The verb is captured with the confirmation snapshot and is as immutable as the snapshot, so a later selection change cannot retarget an in-flight operation's wording. The spellings are written out as data rather than derived from the verb, because "upgrade" gerunds to "upgrading" and "uninstall" to "uninstalling" — any suffix rule would be wrong for one of them.
 
-| Uninstall (pinned today) | Upgrade (to be pinned) |
+| Uninstall | Upgrade |
 |---|---|
 | `Confirm uninstall` | `Confirm upgrade` |
 | `Uninstall <name>?` | `Upgrade <name>?` |
@@ -643,21 +634,27 @@ The model gains the operation alongside its existing snapshot, and about ten SPE
 | `Terminal too small; uninstall cancelled` | `Terminal too small; upgrade cancelled` |
 | `Could not start uninstall` | `Could not start upgrade` |
 
-`Cancelling <name>...`, `Widen terminal to confirm`, `Administrator authentication failed`, and `Administrator authentication timed out` are shared and unchanged. The lowercase-`y`-only confirmation discipline is reused verbatim and must never be re-derived. The fit check that guards the confirmation and password dialogs must measure the longest of **both** verb sets, so a terminal wide enough to confirm one verb cannot be too narrow to render the other mid-operation.
+`Cancelling <name>...`, `Widen terminal to confirm`, `Administrator authentication failed`, and `Administrator authentication timed out` are shared and unchanged. The lowercase-`y`-only confirmation discipline is reused verbatim and is never re-derived.
 
-Key `g` starts an upgrade. The footer gains `Upgrade: g` immediately after `Uninstall: u`. That falls after cell 30, so the section 6 exact 30-cell prefix at width 32, `Search: / | Switch: tab | Unin`, is unchanged; that prefix is a standing constraint on where any future binding may be inserted.
+The fit check measures the longest string of **both** verb sets and both confirmation modals, so a terminal wide enough to confirm one verb can never be too narrow to render the other mid-operation.
 
-`g` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the non-priority status `<name> is up to date`. The destructive machinery stays unreachable for an operation that would be a no-op, and the freshness cell from section 6 is exactly the affordance that tells the user which rows `g` will act on.
+### Keys, and two deviations from this design
 
-### The third cache-invalidation site
+Uninstall moved from `u` to `d`; `u` starts an upgrade; the dependency toggle moved from `d` to `a`. That is the first deviation: this section originally specified `g` for upgrade. The footer became `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q`, and the section 6 exact 30-cell prefix at width 32 is unchanged, because `Uninstall:` stayed third.
 
-A committed upgrade reloads the active list exactly as a committed uninstall does, and must drop both caches. Section 8's "at exactly the two sites" therefore becomes three sites when this section is implemented; the sentence must be amended in the same increment rather than left stale. The pairing rule is unchanged and is what makes the third site safe: an upgrade changes both what `brew list` prints and what `brew info` prints, and the section 6 outdated marks are baked into the cached panel text, so dropping one cache without the other would leave a stale `↑` beside a fresh panel.
+`u` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the ordinary status `<name> is up to date`. The privileged machinery stays unreachable for an operation that would be a no-op, and the section 6 freshness cell is exactly the affordance that tells the user which rows `u` acts on.
 
-### Why this is deferred rather than shipped
+`u` now performs a different mutation than it did before this change, where it uninstalled. No migration notice is shown. The guard is the confirmation itself, which names both the verb and the package and accepts lowercase `y` only, and whose wording differs between the two verbs in the title and the prompt.
 
-The `internal/brew` and `internal/privileged` work above is cheap and low-risk. Shipping only that would leave a generalised seam with a single caller — a speculative abstraction by this repository's own rules, and therefore worse than shipping neither half.
+### The cache-invalidation sites
 
-The cost is the `internal/ui` half: a near-clone of the confirmation → start → progress → password → completion → reload state machine, every string of which is pinned by this document, so each new string must be invented, reviewed, and pinned; plus the fit check re-measured across both verb sets; plus the third invalidation site; plus a roughly doubled section 9/10/11 verification matrix; plus re-pointing the capability-gated real-`sudo` positive test at `brew upgrade`, which — unlike `brew uninstall` against a fixture tree — mutates a package the test cannot restore. Item 1 of this feature, shipped and driven, plus this design is the better trade than a rushed clone of a security-adjacent state machine.
+This section's design predicted a third invalidation site. There are still **two**, and that is the second deviation: the committed-operation reload is one code path shared by both verbs, so a third call site would mean a forked state machine — precisely what generalising the seam exists to avoid. The sentence in section 8 is therefore amended to say two sites, the second of which is reached by either privileged verb, rather than three.
+
+The pairing rule is unchanged and is what makes the shared site safe: either verb changes both what `brew list` prints and what `brew info` prints, and the section 6 outdated marks are baked into the cached panel text, so dropping one cache without the other would leave a stale `↑` beside a fresh panel.
+
+### What was not done
+
+The capability-gated real-`sudo` positive test still exercises `brew uninstall` against a fixture tree. Pointing it at `brew upgrade` would mutate a package the test cannot restore, so upgrade's privileged path is covered by the same fake-job and seam-override tests as uninstall, plus the argv pinning above, and not by a real privileged upgrade. Driven manually to the confirmation and cancelled there, for the same reason.
 
 ## 10. On-demand administrator password and retry
 
@@ -798,13 +795,13 @@ lazybrew/
   internal/ui/view.go
   internal/ui/keys.go
   internal/ui/theme.go
-  internal/uninstall/uninstall.go
-  internal/uninstall/protocol.go
-  internal/uninstall/peer_darwin.go
+  internal/privileged/privileged.go
+  internal/privileged/protocol.go
+  internal/privileged/peer_darwin.go
   internal/brew/*_test.go
   internal/info/*_test.go
   internal/ui/*_test.go
-  internal/uninstall/*_test.go
+  internal/privileged/*_test.go
 ```
 
 No non-Darwin peer adapter or generic package-manager layer is planned.
@@ -814,7 +811,7 @@ No non-Darwin peer adapter or generic package-manager layer is planned.
 Interface:
 
 ```go
-func New(homebrew Homebrew, info *info.Loader, uninstaller Uninstaller) (tea.Model, *Supervisor)
+func New(homebrew Homebrew, info *info.Loader, runner Runner) (tea.Model, *Supervisor)
 func (s *Supervisor) Cleanup(context.Context) error
 ```
 
@@ -861,7 +858,7 @@ func MapCommandFailure(runErr error, stdout, stderr []byte) error
 
 **[REWRITE ADDITION]** `Outdated` is a plain read on the same seam: it reuses the one kind-flag table, the one `run` helper, the one name parser, and `MapCommandFailure`, and adds no validator because it passes no package value. A missing `brew` reported through `Outdated` must produce the same exact text as through `List`, `Info`, or `PrepareUninstall`.
 
-The real adapter hides process execution/reaping, stdout/stderr capture, list parsing, and UI-facing calls. `internal/uninstall` alone adds the canonical askpass environment, process-group ownership, broker, and cleanup to the prepared command; the brew seam does not expose arbitrary commands. A fake adapter supplies deterministic lists/info/errors in model and loader tests.
+The real adapter hides process execution/reaping, stdout/stderr capture, list parsing, and UI-facing calls. `internal/privileged` alone adds the canonical askpass environment, process-group ownership, broker, and cleanup to the prepared command; the brew seam does not expose arbitrary commands. A fake adapter supplies deterministic lists/info/errors in model and loader tests.
 
 ### Latest-only info loader: `internal/info`
 
@@ -879,7 +876,7 @@ func (l *Loader) Text() string
 
 `Result` contains generation, package key, text/error, and no secret. The loader implementation owns generation, cache, current target, active identity, latest pending target, and stale-result rules. `Select`, `Refresh`, and `Complete` are the only mutation seam; callers cannot manipulate cache or active/pending state. Loader tests use a controlled fake `LoadFunc` and complete requests out of order.
 
-### Uninstall/askpass module: `internal/uninstall`
+### Privileged/askpass module: `internal/privileged`
 
 Interfaces:
 

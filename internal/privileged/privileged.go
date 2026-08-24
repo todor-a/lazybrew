@@ -1,4 +1,4 @@
-package uninstall
+package privileged
 
 import (
 	"bytes"
@@ -56,11 +56,11 @@ type Job interface {
 	Wait() Result
 }
 
-type Uninstaller interface {
-	Start(context.Context, brew.Package) (Job, error)
+type Runner interface {
+	Start(context.Context, brew.Operation, brew.Package) (Job, error)
 }
 
-type uninstaller struct {
+type runner struct {
 	executable  string
 	identity    []byte
 	identityErr error
@@ -68,7 +68,7 @@ type uninstaller struct {
 
 var (
 	createPrivateEndpoint   = createEndpoint
-	prepareUninstall        = brew.PrepareUninstall
+	prepareCommand          = brew.PrepareCommand
 	acquireEvidence         = acquirePeerEvidence
 	verifyEvidence          = verifyPeerEvidence
 	peerStillAuthenticated  = peerRemainsAuthenticated
@@ -103,28 +103,28 @@ var coreState struct {
 	err    error
 }
 
-func New() Uninstaller {
+func New() Runner {
 	path, err := resolvedExecutable()
 	if err != nil {
-		return &uninstaller{identityErr: err}
+		return &runner{identityErr: err}
 	}
 	identity, identityErr := loadedCodeIdentity(os.Getpid())
-	return &uninstaller{executable: path, identity: identity, identityErr: identityErr}
+	return &runner{executable: path, identity: identity, identityErr: identityErr}
 }
 
-func (u *uninstaller) Start(parent context.Context, pkg brew.Package) (Job, error) {
+func (u *runner) Start(parent context.Context, op brew.Operation, pkg brew.Package) (Job, error) {
 	endpoint, err := createPrivateEndpoint()
 	if err != nil {
-		return nil, fmt.Errorf("Could not start uninstall: %w", err)
+		return nil, fmt.Errorf("Could not start %s: %w", op.Verb(), err)
 	}
 
 	baseEnv := os.Environ()
 	env, err := canonicalEnvironment(baseEnv, u.executable, endpoint.socketPath)
 	if err != nil {
 		cleanupErr := endpoint.closeExact()
-		return nil, fmt.Errorf("Could not start uninstall: %w", errors.Join(err, cleanupErr))
+		return nil, fmt.Errorf("Could not start %s: %w", op.Verb(), errors.Join(err, cleanupErr))
 	}
-	prepared, err := prepareUninstall(env, pkg)
+	prepared, err := prepareCommand(env, op, pkg)
 	if err != nil {
 		return nil, errors.Join(err, endpoint.closeExact())
 	}
@@ -162,7 +162,7 @@ func (u *uninstaller) Start(parent context.Context, pkg brew.Package) (Job, erro
 		j.armWorkers()
 		var cleanupErr error
 		if !waitBefore(j.workersDone, time.Now().Add(cleanupTimeout)) {
-			cleanupErr = errors.New("fatal uninstall cleanup failure: workers did not stop before cleanup deadline")
+			cleanupErr = errors.New("fatal cleanup failure: workers did not stop before cleanup deadline")
 		}
 		return nil, errors.Join(brew.MapCommandFailure(err, nil, nil), endpoint.closeExact(), cleanupErr)
 	}
@@ -176,7 +176,7 @@ func (u *uninstaller) Start(parent context.Context, pkg brew.Package) (Job, erro
 	return j, nil
 }
 
-func (u *uninstaller) authenticationCapabilityError() error {
+func (u *runner) authenticationCapabilityError() error {
 	if u.identityErr != nil || u.executable == "" || len(u.identity) == 0 {
 		return errAuthentication
 	}
@@ -402,7 +402,7 @@ func (j *job) cleanup() (error, bool) {
 	}
 	workersStopped := waitBefore(j.workersDone, deadline)
 	if !workersStopped {
-		errs = append(errs, errors.New("uninstall workers did not stop before cleanup deadline"))
+		errs = append(errs, errors.New("workers did not stop before cleanup deadline"))
 	}
 
 	j.mu.Lock()
@@ -427,7 +427,7 @@ func (j *job) cleanup() (error, bool) {
 	if len(errs) == 0 {
 		return nil, workersStopped
 	}
-	return fmt.Errorf("fatal uninstall cleanup failure: %w", errors.Join(errs...)), workersStopped
+	return fmt.Errorf("fatal cleanup failure: %w", errors.Join(errs...)), workersStopped
 }
 
 func cleanupPhaseBefore(deadline time.Time) time.Duration {

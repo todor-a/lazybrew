@@ -1,4 +1,4 @@
-package uninstall
+package privileged
 
 /*
 #cgo LDFLAGS: -framework Security -framework CoreFoundation

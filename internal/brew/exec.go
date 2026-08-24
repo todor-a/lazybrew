@@ -34,18 +34,44 @@ const missingBrewMessage = "Homebrew is not installed or brew is not on PATH"
 // it promises, so this applies to every read rather than only to outdated.
 const noAutoUpdate = "HOMEBREW_NO_AUTO_UPDATE=1"
 
-var errUnsafeUninstall = errors.New("Unsafe package name; uninstall refused")
+// Operation is a brew verb that mutates an installed package and therefore may
+// require administrator authentication.
+type Operation uint8
 
-// ResolvedCommand is the resolved, exact command boundary used by uninstall.
+const (
+	Uninstall Operation = iota
+	Upgrade
+)
+
+// Verb is the brew subcommand, which is also the word every user-facing string
+// for the operation is built from.
+func (o Operation) Verb() string {
+	if o == Upgrade {
+		return "upgrade"
+	}
+	return "uninstall"
+}
+
+func (o Operation) valid() bool { return o == Uninstall || o == Upgrade }
+
+var errInvalidOperation = errors.New("invalid Homebrew operation")
+
+// ResolvedCommand is the resolved, exact command boundary used by every
+// privileged operation.
 type ResolvedCommand struct {
 	Path string
 	Args []string
 }
 
-// PrepareUninstall validates a confirmed package and resolves its exact command.
-func PrepareUninstall(env []string, pkg Package) (ResolvedCommand, error) {
+// PrepareCommand validates a confirmed package and resolves the exact command for
+// one operation. It is the only argv builder for a privileged verb; a second one
+// must never exist, for either verb.
+func PrepareCommand(env []string, op Operation, pkg Package) (ResolvedCommand, error) {
+	if !op.valid() {
+		return ResolvedCommand{}, errInvalidOperation
+	}
 	if !safePackageName(pkg.Name) {
-		return ResolvedCommand{}, errUnsafeUninstall
+		return ResolvedCommand{}, fmt.Errorf("Unsafe package name; %s refused", op.Verb())
 	}
 	flag, err := kindFlag(pkg.Kind)
 	if err != nil {
@@ -57,7 +83,7 @@ func PrepareUninstall(env []string, pkg Package) (ResolvedCommand, error) {
 	}
 	return ResolvedCommand{
 		Path: path,
-		Args: []string{"uninstall", flag, pkg.Name},
+		Args: []string{op.Verb(), flag, pkg.Name},
 	}, nil
 }
 
