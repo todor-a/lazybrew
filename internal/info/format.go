@@ -158,7 +158,14 @@ func versionRow(pkg brew.Package, lines []string) string {
 	if installed == "" {
 		return ""
 	}
-	latest := latestVersion(lines)
+	// The offered version prefers the `brew outdated` value carried on the
+	// package — the same source as the Outdated verdict itself — and falls back
+	// to the version parsed from the info text, which is the only source for a
+	// package Homebrew does not report as outdated.
+	latest := pkg.LatestVersion
+	if latest == "" {
+		latest = latestVersion(lines)
+	}
 	newer := latest != "" && latest != installed
 	switch {
 	case pkg.Outdated && newer:

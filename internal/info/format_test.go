@@ -82,6 +82,14 @@ func TestFormatSaysOutdatedOnlyOnHomebrewsVerdict(t *testing.T) {
 			raw:  formulaRaw,
 			want: "Version    0.45.1  (outdated)",
 		},
+		{
+			// The latest carried in from `brew outdated` outranks the version
+			// parsed from the info text: it is the same source as the verdict.
+			name: "reported with the verdict's own latest version",
+			pkg:  brew.Package{Name: "postman", Kind: brew.Cask, Outdated: true, LatestVersion: "12.24.6"},
+			raw:  outdatedCaskRaw,
+			want: "Version    12.24.4  (outdated, latest 12.24.6)",
+		},
 	}
 
 	for _, tt := range tests {

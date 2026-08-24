@@ -101,32 +101,56 @@ func TestListCommandVectors(t *testing.T) {
 }
 
 func TestOutdatedCommandVectors(t *testing.T) {
+	// One report carrying both arrays, as brew always prints it; each kind must
+	// read only its own array, because a formula and a cask can share a name.
+	const report = `{"formulae":[{"name":"vault","installed_versions":["1.16.0","1.17.0"],"current_version":"1.18.1"}],` +
+		`"casks":[{"name":"postman","installed_versions":["12.24.4"],"current_version":"12.24.5"}]}`
 	tests := []struct {
 		name string
 		kind Kind
-		want []string
+		args []string
+		want []OutdatedPackage
 	}{
-		{name: "cask", kind: Cask, want: []string{"outdated", "--cask", "--quiet"}},
-		{name: "formula", kind: Formula, want: []string{"outdated", "--formula", "--quiet"}},
+		{name: "cask", kind: Cask, args: []string{"outdated", "--cask", "--json=v2"},
+			want: []OutdatedPackage{{Name: "postman", Installed: "12.24.4", Latest: "12.24.5"}}},
+		// The formula row also pins that the newest of several installed
+		// versions is the one reported, since that is the one an upgrade replaces.
+		{name: "formula", kind: Formula, args: []string{"outdated", "--formula", "--json=v2"},
+			want: []OutdatedPackage{{Name: "vault", Installed: "1.17.0", Latest: "1.18.1"}}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			argsFile := configureFakeBrew(t, "postman\n\nvault\n", "", 0, false)
-			names, err := New().Outdated(context.Background(), tt.kind)
+			argsFile := configureFakeBrew(t, report, "", 0, false)
+			packages, err := New().Outdated(context.Background(), tt.kind)
 			if err != nil {
 				t.Fatalf("Outdated() error = %v", err)
 			}
-			if want := []string{"postman", "vault"}; !slices.Equal(names, want) {
-				t.Fatalf("Outdated() = %#v, want %#v", names, want)
+			if !slices.Equal(packages, tt.want) {
+				t.Fatalf("Outdated() = %#v, want %#v", packages, tt.want)
 			}
-			assertRecordedArgs(t, argsFile, tt.want)
+			assertRecordedArgs(t, argsFile, tt.args)
 			// --greedy would mark an auto-updating cask that brew will not upgrade.
-			// Read back from the recording, not from tt.want: asserting against the
+			// Read back from the recording, not from tt.args: asserting against the
 			// expectation table only fires if someone edits the table, and never
 			// observes the vector the code actually built.
 			assertArgAbsent(t, argsFile, "--greedy")
 		})
+	}
+}
+
+// Malformed JSON must surface as an error the list load absorbs into an
+// unmarked list, and a nameless row must vanish rather than mark by accident.
+func TestParseOutdatedDegradations(t *testing.T) {
+	if _, err := parseOutdated([]byte("not json"), Formula); err == nil {
+		t.Error("parseOutdated() accepted malformed JSON")
+	}
+	packages, err := parseOutdated([]byte(`{"formulae":[{"name":"","current_version":"1.1"},{"name":"ok","current_version":"2.0"}]}`), Formula)
+	if err != nil {
+		t.Fatalf("parseOutdated() error = %v", err)
+	}
+	if want := []OutdatedPackage{{Name: "ok", Latest: "2.0"}}; !slices.Equal(packages, want) {
+		t.Fatalf("parseOutdated() = %#v, want %#v", packages, want)
 	}
 }
 

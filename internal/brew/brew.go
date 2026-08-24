@@ -2,6 +2,7 @@ package brew
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -32,6 +33,11 @@ type Package struct {
 	// evidence at all. Display state only: it is outside the cache key, the
 	// filter value, and every argv, exactly as Outdated is.
 	OutdatedKnown bool
+	// LatestVersion is the version `brew outdated` offers for an outdated
+	// package, and empty everywhere else. Display data, not identity, exactly
+	// like Version: it is outside the (Kind, Name) info-cache key, the filter
+	// value, and every argv.
+	LatestVersion string
 	// Dependency is true when Homebrew reports the formula as not installed on
 	// request. Always false for a cask. Display data, not identity, exactly like
 	// Version: the (Kind, Name) info-cache key is unaffected.
@@ -41,7 +47,7 @@ type Package struct {
 // Homebrew exposes the read-only operations used by the application.
 type Homebrew interface {
 	List(context.Context, Kind) ([]Package, error)
-	Outdated(context.Context, Kind) ([]string, error)
+	Outdated(context.Context, Kind) ([]OutdatedPackage, error)
 	Info(context.Context, Package) (string, error)
 	Uses(context.Context, Package) ([]string, error)
 	Sizes(context.Context) (Sizes, error)
@@ -133,7 +139,20 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	return packages, nil
 }
 
-// Outdated reports the names of kind that `brew upgrade` would act on.
+// OutdatedPackage is one row of `brew outdated`: the package Homebrew would
+// upgrade, the version it holds, and the version it offers. Installed is the
+// newest version present when several are, which is the one an upgrade
+// replaces.
+type OutdatedPackage struct {
+	Name      string
+	Installed string
+	Latest    string
+}
+
+// Outdated reports the packages of kind that `brew upgrade` would act on,
+// with the installed and offered versions. `--json=v2` instead of `--quiet`
+// because the names-only form withholds the versions this exists to show;
+// the reported set is identical.
 //
 // Never `--greedy`. Homebrew's default set already excludes the auto-updating
 // casks it will not touch, and adding the flag would mark a cask that legitimately
@@ -143,17 +162,56 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 //
 // Per kind rather than one combined call: a formula and a cask can share a name,
 // and the marker set is consulted per kind.
-func (client) Outdated(ctx context.Context, kind Kind) ([]string, error) {
+func (client) Outdated(ctx context.Context, kind Kind) ([]OutdatedPackage, error) {
 	flag, err := kindFlag(kind)
 	if err != nil {
 		return nil, err
 	}
 
-	stdout, _, err := run(ctx, []string{"outdated", flag, "--quiet"})
+	stdout, _, err := run(ctx, []string{"outdated", flag, "--json=v2"})
 	if err != nil {
 		return nil, err
 	}
-	return parseNames(string(stdout)), nil
+	return parseOutdated(stdout, kind)
+}
+
+// parseOutdated reads the `--json=v2` report. The report always carries both
+// arrays; only the requested kind's is read, because a formula and a cask can
+// share a name and the marker set is consulted per kind. Malformed JSON is an
+// error, which the list load absorbs into an unmarked list — exactly the
+// degradation a failed read gets, and never a wrong number.
+func parseOutdated(raw []byte, kind Kind) ([]OutdatedPackage, error) {
+	var report struct {
+		Formulae []outdatedRow `json:"formulae"`
+		Casks    []outdatedRow `json:"casks"`
+	}
+	if err := json.Unmarshal(raw, &report); err != nil {
+		return nil, err
+	}
+	rows := report.Formulae
+	if kind == Cask {
+		rows = report.Casks
+	}
+	packages := make([]OutdatedPackage, 0, len(rows))
+	for _, row := range rows {
+		if row.Name == "" {
+			continue
+		}
+		installed := ""
+		if len(row.InstalledVersions) > 0 {
+			// Homebrew lists installed versions oldest first; the last is the one
+			// an upgrade replaces.
+			installed = row.InstalledVersions[len(row.InstalledVersions)-1]
+		}
+		packages = append(packages, OutdatedPackage{Name: row.Name, Installed: installed, Latest: row.CurrentVersion})
+	}
+	return packages, nil
+}
+
+type outdatedRow struct {
+	Name              string   `json:"name"`
+	InstalledVersions []string `json:"installed_versions"`
+	CurrentVersion    string   `json:"current_version"`
 }
 
 func (client) Info(ctx context.Context, pkg Package) (string, error) {
