@@ -415,6 +415,35 @@ func mustExecutable(t *testing.T) string {
 	return executable
 }
 
+// assertRecordedArgsAnyOrder asserts the complete SET of brew invocations without
+// pinning their order. For an operation whose reads run concurrently the order is
+// not a guarantee the code makes, so asserting it would pin scheduling rather than
+// behaviour and fail at random.
+func assertRecordedArgsAnyOrder(t *testing.T, path string, want ...[]string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	records := strings.Split(string(data), recordSeparator)
+	records = records[:len(records)-1]
+	if len(records) != len(want) {
+		t.Fatalf("recorded %d brew invocations, want %d: %q", len(records), len(want), records)
+	}
+	remaining := append([][]string(nil), want...)
+	for _, record := range records {
+		var got []string
+		if record != "" {
+			got = strings.Split(record, "\x00")
+		}
+		at := slices.IndexFunc(remaining, func(candidate []string) bool { return slices.Equal(candidate, got) })
+		if at < 0 {
+			t.Fatalf("unexpected invocation argv = %#v; still expecting %#v", got, remaining)
+		}
+		remaining = slices.Delete(remaining, at, at+1)
+	}
+}
+
 // assertArgAbsent asserts no invocation carried the given argument. Parsed with
 // the same record split as assertRecordedArgs, so a separator cannot glue the
 // argument onto a neighbouring token and hide it.

@@ -94,7 +94,8 @@ func TestListCommandVectors(t *testing.T) {
 			if want := []Package{{Name: "alpha", Version: "1.0", Kind: tt.kind}}; !slices.Equal(packages, want) {
 				t.Fatalf("List() = %#v, want %#v", packages, want)
 			}
-			assertRecordedArgs(t, argsFile, tt.want...)
+			// Any order: the formula case's two reads are concurrent.
+			assertRecordedArgsAnyOrder(t, argsFile, tt.want...)
 		})
 	}
 }
@@ -161,7 +162,7 @@ func TestFormulaListMarksOnlyTheReportedDependencySet(t *testing.T) {
 	if !slices.Equal(packages, want) {
 		t.Fatalf("List() = %#v, want %#v", packages, want)
 	}
-	assertRecordedArgs(t, argsFile,
+	assertRecordedArgsAnyOrder(t, argsFile,
 		[]string{"list", "--formula"},
 		[]string{"list", "--formula", "--no-installed-on-request"},
 	)
@@ -185,7 +186,7 @@ func TestFormulaListFailsWhenTheDependencyMarkerCallFails(t *testing.T) {
 	}
 	// Both invocations ran: the enumeration succeeded and the marker call is the
 	// one that failed.
-	assertRecordedArgs(t, argsFile,
+	assertRecordedArgsAnyOrder(t, argsFile,
 		[]string{"list", "--formula"},
 		[]string{"list", "--formula", "--no-installed-on-request"})
 }

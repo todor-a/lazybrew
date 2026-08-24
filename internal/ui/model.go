@@ -570,23 +570,25 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
 	case "d", "D":
 		m.showDeps = !m.showDeps
-		m.status, m.priority = "Dependencies: hidden", false
-		if m.showDeps {
-			m.status = "Dependencies: shown"
-		}
 		// Casks have no dependency relation, so only the status changes there. The
 		// flag still flips, so the key is never silently dead and a later `tab`
 		// lands in the requested state.
-		if m.kind == brew.Formula {
-			return m.reorder()
+		if m.kind != brew.Formula {
+			m.status, m.priority = dependencyStatus(m.showDeps), false
+			return nil
 		}
+		cmd, applied := m.reorder()
+		if applied {
+			m.status, m.priority = dependencyStatus(m.showDeps), false
+		}
+		return cmd
 	case "o", "O":
 		m.sortBySize = !m.sortBySize
-		m.status, m.priority = "Sort: name", false
-		if m.sortBySize {
-			m.status = "Sort: size"
+		cmd, applied := m.reorder()
+		if applied {
+			m.status, m.priority = sortStatus(m.sortBySize), false
 		}
-		return m.reorder()
+		return cmd
 	case "r", "R":
 		selection := m.list.Index()
 		sizesCmd := m.invalidateCaches()
@@ -1057,7 +1059,15 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	// most once, only in the first seconds, and only if `o` was pressed before
 	// the pass landed. Preserving the selected package by name is the fix if that
 	// proves annoying.
-	if m.sortBySize && !m.loading && (m.mode == modeNormal || m.mode == modeSearch) {
+	//
+	// Only uninstall progress is excluded. That mode freezes the list by contract,
+	// and the reload that ends it calls setPackages, which re-applies the sort
+	// anyway. A confirmation or password dialog is a centered overlay over a list
+	// the section 9 immutable snapshot already protects, so re-ordering underneath
+	// it changes nothing that matters - and skipping it there left the request
+	// dropped with no retry, so cancelling the dialog returned to a list in source
+	// order while the status still claimed a size sort.
+	if m.sortBySize && !m.loading && m.mode != modeUninstall {
 		if cached, ok := m.listCache[m.kind]; ok {
 			m.setPackages(cached, 0)
 			return m.selectInfo()
@@ -1146,13 +1156,31 @@ func (m *model) setPackages(packages []brew.Package, selection int) {
 
 // reorder re-runs setPackages against the retained list for the active kind. It
 // starts no command: `d` and `o` are pure re-renders, instant in both directions.
-func (m *model) reorder() tea.Cmd {
+// reorder re-renders the retained list under the current toggles, and reports
+// whether it had a list to re-render. With none - after a failed load - the
+// caller must not replace whatever the status already says, which is typically
+// the load error, with a claim about an order the user cannot see.
+func dependencyStatus(shown bool) string {
+	if shown {
+		return "Dependencies: shown"
+	}
+	return "Dependencies: hidden"
+}
+
+func sortStatus(bySize bool) string {
+	if bySize {
+		return "Sort: size"
+	}
+	return "Sort: name"
+}
+
+func (m *model) reorder() (tea.Cmd, bool) {
 	cached, ok := m.listCache[m.kind]
 	if !ok {
-		return nil
+		return nil, false
 	}
 	m.setPackages(cached, 0)
-	return m.selectInfo()
+	return m.selectInfo(), true
 }
 
 func (m *model) applyFilter(selection int) {

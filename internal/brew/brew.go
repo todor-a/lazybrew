@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"unicode"
 )
 
@@ -80,20 +81,46 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
+	if kind != Formula {
+		stdout, _, err := run(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		return parseList(string(stdout), kind), nil
+	}
 
-	stdout, _, err := run(ctx, args)
-	if err != nil {
-		return nil, err
+	// The enumeration and the dependency marker are independent reads of the same
+	// inventory, so they run concurrently. Sequentially they were about 0.64s each
+	// on the development machine, which doubled the formula load the list cache
+	// exists to avoid; concurrently the load is the slower of the two.
+	var (
+		wg                       sync.WaitGroup
+		stdout, dependencyStdout []byte
+		listErr, dependencyErr   error
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		stdout, _, listErr = run(ctx, args)
+	}()
+	go func() {
+		defer wg.Done()
+		dependencyStdout, _, dependencyErr = run(ctx, []string{"list", "--formula", "--no-installed-on-request"})
+	}()
+	wg.Wait()
+
+	// The enumeration first: a failure there means there is no inventory at all,
+	// which is the more useful thing to report.
+	if listErr != nil {
+		return nil, listErr
+	}
+	// The marker read stays load-bearing. Degrading to an unmarked list would show
+	// every dependency as installed on request, and the toggle that reveals them
+	// would silently show nothing.
+	if dependencyErr != nil {
+		return nil, dependencyErr
 	}
 	packages := parseList(string(stdout), kind)
-	if kind != Formula {
-		return packages, nil
-	}
-
-	dependencyStdout, _, err := run(ctx, []string{"list", "--formula", "--no-installed-on-request"})
-	if err != nil {
-		return nil, err
-	}
 	dependencies := make(map[string]struct{})
 	for _, name := range parseNames(string(dependencyStdout)) {
 		dependencies[name] = struct{}{}
