@@ -261,12 +261,27 @@ func parseNames(output string) []string {
 	return names
 }
 
+// listArgs is deliberately asymmetric about --versions. For formulae the flag
+// reads keg directory names out of the Cellar, so it fills the version column
+// at the same cost as the bare listing (measured ~0.4s either way), and even
+// an untrusted-tap formula still lists. For casks the same flag has to
+// evaluate every cask to learn its version, and Homebrew's tap-trust gate
+// then refuses the whole listing over one untrusted tap — measured on the
+// development machine: a single untrusted cask tap exits the command with
+// zero rows. One tapped cask must not cost the entire pane, so the cask
+// inventory stays bare names.
+//
+// ponytail: a formula with several installed versions prints them all on one
+// row and parseList keeps the remainder verbatim ("1.0 1.2"), which is the
+// truth about what is installed. Picking one would impose an order this
+// listing does not promise; the upgrade path is brew outdated's
+// installed_versions, which does.
 func listArgs(kind Kind) ([]string, error) {
 	switch kind {
 	case Cask:
 		return []string{"list", "--cask", "-1"}, nil
 	case Formula:
-		return []string{"list", "--formula"}, nil
+		return []string{"list", "--formula", "--versions"}, nil
 	default:
 		return nil, errInvalidKind
 	}
