@@ -42,6 +42,14 @@ func TestParseList(t *testing.T) {
 			},
 		},
 		{
+			// brew list --versions prints every installed version of one keg on a
+			// single row; the remainder is kept verbatim rather than guessed at.
+			name:   "multiple installed versions stay on the row",
+			output: "jq 1.7.1 1.8.0\n",
+			kind:   Formula,
+			want:   []Package{{Name: "jq", Version: "1.7.1 1.8.0", Kind: Formula}},
+		},
+		{
 			name:   "unicode whitespace and output order",
 			output: "\u2003first\u20021.0\u2003beta\r\nsecond 2.0\n",
 			kind:   Cask,
@@ -77,7 +85,7 @@ func TestListCommandVectors(t *testing.T) {
 			name: "formula enumerates every install and then marks dependencies",
 			kind: Formula,
 			want: [][]string{
-				{"list", "--formula"},
+				{"list", "--formula", "--versions"},
 				{"list", "--formula", "--no-installed-on-request"},
 			},
 		},
@@ -163,7 +171,7 @@ func TestFormulaListMarksOnlyTheReportedDependencySet(t *testing.T) {
 		t.Fatalf("List() = %#v, want %#v", packages, want)
 	}
 	assertRecordedArgsAnyOrder(t, argsFile,
-		[]string{"list", "--formula"},
+		[]string{"list", "--formula", "--versions"},
 		[]string{"list", "--formula", "--no-installed-on-request"},
 	)
 }
@@ -187,7 +195,7 @@ func TestFormulaListFailsWhenTheDependencyMarkerCallFails(t *testing.T) {
 	// Both invocations ran: the enumeration succeeded and the marker call is the
 	// one that failed.
 	assertRecordedArgsAnyOrder(t, argsFile,
-		[]string{"list", "--formula"},
+		[]string{"list", "--formula", "--versions"},
 		[]string{"list", "--formula", "--no-installed-on-request"})
 }
 
