@@ -188,7 +188,7 @@ func newTestModel(t *testing.T) (*model, *fakeUninstaller) {
 	job := newFakeJob()
 	uninstaller := &fakeUninstaller{job: job}
 	loader := info.New(homebrew.Info)
-	root, _ := New(homebrew, loader, uninstaller)
+	root, _ := New(homebrew, loader, uninstaller, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	for _, message := range immediateMessages(m.Init()) {
@@ -531,7 +531,7 @@ func TestQuitCancelsActiveAndPendingInfoBeforeCompletingResult(t *testing.T) {
 		return "", ctx.Err()
 	})
 	homebrew := &fakeHomebrew{}
-	root, _ := New(homebrew, loader, &fakeUninstaller{})
+	root, _ := New(homebrew, loader, &fakeUninstaller{}, t.TempDir())
 	m := root.(*model)
 	m.loading = false
 	m.setPackages([]brew.Package{
@@ -592,7 +592,7 @@ func TestQuitCancelsPendingInfoPromotedByRacingResult(t *testing.T) {
 		<-ctx.Done()
 		return "", ctx.Err()
 	})
-	root, _ := New(&fakeHomebrew{}, loader, &fakeUninstaller{})
+	root, _ := New(&fakeHomebrew{}, loader, &fakeUninstaller{}, t.TempDir())
 	m := root.(*model)
 	m.loading = false
 	m.setPackages([]brew.Package{
@@ -948,7 +948,7 @@ func TestOutdatedMarksRideTheListCacheAcrossASwitch(t *testing.T) {
 		// dependency-only formulae the list filters out.
 		outdated: map[brew.Kind][]string{brew.Cask: {"Beta", "ghostwriter"}},
 	}
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
@@ -988,7 +988,7 @@ func TestAFailedOutdatedReadStillLoadsAnUnmarkedList(t *testing.T) {
 		outdated:    map[brew.Kind][]string{brew.Cask: {"Alpha"}},
 		outdatedErr: errors.New("brew outdated exploded"),
 	}
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
@@ -1012,7 +1012,7 @@ func TestKindSwitchServesCachedListWithoutReshelling(t *testing.T) {
 		brew.Cask:    {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 		brew.Formula: {{Name: "zlib", Version: "1.3", Kind: brew.Formula}},
 	}}
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
@@ -1053,7 +1053,7 @@ func TestEmptyKindIsCachedRatherThanReshelledEverySwitch(t *testing.T) {
 	homebrew := &fakeHomebrew{packages: map[brew.Kind][]brew.Package{
 		brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 	}}
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
@@ -1074,7 +1074,7 @@ func TestRefreshDropsTheWholeListCache(t *testing.T) {
 		brew.Cask:    {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 		brew.Formula: {{Name: "zlib", Version: "1.3", Kind: brew.Formula}},
 	}}
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
@@ -1128,7 +1128,7 @@ func diskFleet() *fakeHomebrew {
 func newFleetModel(t *testing.T) (*model, *fakeHomebrew) {
 	t.Helper()
 	homebrew := diskFleet()
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
@@ -1306,7 +1306,7 @@ func TestInstalledCountFollowsTheDependencyToggle(t *testing.T) {
 // not drag the list into a loading mode or start the spinner.
 func TestListIsFullyNavigableBeforeSizesLand(t *testing.T) {
 	homebrew := diskFleet()
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 
@@ -1524,7 +1524,7 @@ func TestASupersededSizePassIsCancelled(t *testing.T) {
 			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 		},
 	}
-	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()})
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 

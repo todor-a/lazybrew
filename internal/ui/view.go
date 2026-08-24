@@ -37,21 +37,21 @@ func (m *model) baseView() string {
 	if m.mode == modeSearch {
 		borderRole = m.currentTheme().search
 	}
-	rule := roleStyle(borderRole).Render(strings.Repeat("─", interiorWidth))
+	rule := m.roleStyle(borderRole).Render(strings.Repeat("─", interiorWidth))
 	lines := make([]string, 0, m.height-2)
-	lines = append(lines, m.styledLine(m.headerLine(), interiorWidth, roleStyle(m.currentTheme().header)))
+	lines = append(lines, fitStyled(m.headerRow(), interiorWidth, lipgloss.NewStyle()))
 	lines = append(lines, rule)
 	lines = append(lines, m.contentLines()...)
 	lines = append(lines, rule)
 
-	statusStyle := roleStyle(m.currentTheme().status)
+	statusStyle := m.roleStyle(m.currentTheme().status)
 	if m.mode == modeSearch {
-		statusStyle = roleStyle(m.currentTheme().search).Bold(true)
+		statusStyle = m.roleStyle(m.currentTheme().search).Bold(true)
 	}
 	lines = append(lines, m.styledLine(m.statusLine(), interiorWidth, statusStyle))
 	lines = append(lines, m.footerLine(interiorWidth))
 
-	border := borderStyle(borderRole)
+	border := m.borderStyle(borderRole)
 	return border.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
 }
 
@@ -81,6 +81,27 @@ func (m *model) headerLine() string {
 	// tab bar plus a gap plus a six-cell total is 29.
 	gap := m.width - 2 - lipgloss.Width(label) - lipgloss.Width(total)
 	return label + strings.Repeat(" ", gap) + total
+}
+
+// headerRow is headerLine with the roles painted on: the active tab carries the
+// header accent, everything else is faint. The brackets stay the load-bearing
+// cue — the styling only echoes them — so the row still reads on a monochrome
+// theme. Cell layout is identical to headerLine's, which the tests pin.
+func (m *model) headerRow() string {
+	apps, formulae := tabSlots(m.kind)
+	active := m.roleStyle(m.currentTheme().header).Bold(true)
+	faint := lipgloss.NewStyle().Faint(true)
+	appsStyle, formulaeStyle := faint, active
+	if m.kind == brew.Cask {
+		appsStyle, formulaeStyle = active, faint
+	}
+	row := appsStyle.Render(apps) + "  " + formulaeStyle.Render(formulae)
+	if m.sizes == nil || m.kind != brew.Formula {
+		return row
+	}
+	total := humanKB(m.sizes.Total)
+	gap := m.width - 2 - 22 - lipgloss.Width(total)
+	return row + strings.Repeat(" ", gap) + faint.Render(total)
 }
 
 // rowSize is blank until the pass lands and for any package it did not measure,
@@ -128,17 +149,22 @@ func padLeft(value string, width int) string {
 // Each name keeps a fixed 8- and 12-cell slot with the bracket columns reserved
 // on both sides, so switching swaps the brackets without shifting either name.
 func activeListLabel(kind brew.Kind) string {
+	apps, formulae := tabSlots(kind)
+	return apps + "  " + formulae
+}
+
+func tabSlots(kind brew.Kind) (apps, formulae string) {
 	if kind == brew.Cask {
-		return "[ Apps ]    Formulae  "
+		return "[ Apps ]", "  Formulae  "
 	}
-	return "  Apps    [ Formulae ]"
+	return "  Apps  ", "[ Formulae ]"
 }
 
 func (m *model) contentLines() []string {
 	if m.width < 72 {
 		return m.listLines(m.width-2, m.contentRows)
 	}
-	divider := m.width / 2
+	divider := splitColumn(m.width)
 	leftWidth := divider - 1
 	rightWidth := m.width - divider - 2
 	left := m.listLines(leftWidth, m.contentRows)
@@ -150,12 +176,20 @@ func (m *model) contentLines() []string {
 	return lines
 }
 
+// splitColumn caps the info pane at 46 interior cells. Below 96 columns the
+// split stays at half; past that the surplus goes to the list, because brew
+// descriptions wrap fine at 46 cells while the list keeps gaining columns for
+// long names. The resize path sizes the list and viewport from the same figure.
+func splitColumn(width int) int {
+	return max(width/2, width-48)
+}
+
 func (m *model) divider() string {
 	role := m.currentTheme().border
 	if m.mode == modeSearch {
 		role = m.currentTheme().search
 	}
-	return roleStyle(role).Render("│")
+	return m.roleStyle(role).Render("│")
 }
 
 func (m *model) listLines(width, height int) []string {
@@ -240,7 +274,7 @@ func (m *model) scrollbarColumn(height, totalPages, page int) []string {
 		thumbTop = travel * page / (totalPages - 1)
 	}
 
-	style := roleStyle(m.currentTheme().border)
+	style := m.roleStyle(m.currentTheme().border)
 	column := make([]string, height)
 	for row := range column {
 		glyph := " "
@@ -310,7 +344,7 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if m.monochrome {
 		return lipgloss.NewStyle().Reverse(true).Bold(true).Render(line)
 	}
-	return roleStyle(m.currentTheme().selected).Bold(false).Render(line)
+	return m.roleStyle(m.currentTheme().selected).Bold(true).Render(line)
 }
 
 func (m *model) infoLines(width, height int) []string {
@@ -368,17 +402,20 @@ func (m *model) statusLine() string {
 		}
 		return status
 	}
-	prefix := "Search [/ or s]: " + m.query
-	if m.query == "" {
-		prefix = "Search [/ or s]: —"
+	// The footer already teaches "/" — a permanent "Search: —" placeholder here
+	// only restated it. The prefix appears when a filter is actually narrowing
+	// the list, which is the one moment it carries information.
+	parts := make([]string, 0, 3)
+	if m.query != "" {
+		parts = append(parts, "Search: "+m.query)
 	}
 	if count := m.installedStatus(); count != "" {
-		prefix += " | " + count
+		parts = append(parts, count)
 	}
 	if status != "" {
-		return prefix + " | " + status
+		parts = append(parts, status)
 	}
-	return prefix
+	return strings.Join(parts, " · ")
 }
 
 func kindPlural(kind brew.Kind) string {
@@ -409,13 +446,16 @@ func (m *model) footerLine(width int) string {
 	footer := m.currentTheme().footer
 	h := m.help
 	h.SetWidth(0)
-	h.ShortSeparator = " | "
+	h.ShortSeparator = " · "
+	// The verb (in the key slot, see keys.go) goes faint and the keystroke keeps
+	// the accent, so the row reads as dim prose punctuated by bright keys instead
+	// of a solid colored bar.
 	h.Styles = help.Styles{
-		ShortKey:       roleStyle(footer),
-		ShortDesc:      roleStyle(footer).Bold(true),
-		ShortSeparator: roleStyle(footer).Faint(true),
+		ShortKey:       m.roleStyle(footer).Faint(true),
+		ShortDesc:      m.roleStyle(footer).Bold(true),
+		ShortSeparator: m.roleStyle(footer).Faint(true),
 	}
-	return fitStyled(h.View(keys), width, roleStyle(footer))
+	return fitStyled(h.View(keys), width, m.roleStyle(footer))
 }
 
 func (m *model) styledLine(value string, width int, style lipgloss.Style) string {
@@ -447,7 +487,7 @@ func fit(value string, width int) string {
 func (m *model) currentTheme() theme { return themes[m.themeIndex] }
 
 func (m *model) modalStyle() lipgloss.Style {
-	return borderStyle(m.currentTheme().border).Padding(0, 1)
+	return m.borderStyle(m.currentTheme().border).Padding(0, 1)
 }
 
 func otherOperation(op brew.Operation) brew.Operation {
@@ -463,9 +503,9 @@ func (m *model) confirmationModal(pkg brew.Package) string {
 
 func (m *model) confirmationModalFor(op brew.Operation, pkg brew.Package) string {
 	lines := []string{
-		roleStyle(m.currentTheme().header).Render(confirmTitle(op)),
+		m.roleStyle(m.currentTheme().header).Render(confirmTitle(op)),
 		words(op).title + " " + pkg.Name + "?",
-		roleStyle(m.currentTheme().footer).Render("y: confirm  other: cancel"),
+		m.roleStyle(m.currentTheme().footer).Render("y: confirm  other: cancel"),
 	}
 	return m.modalStyle().Render(strings.Join(lines, "\n"))
 }
@@ -476,10 +516,10 @@ func (m *model) passwordModal() string {
 		body = "Wrong password? Try again."
 	}
 	lines := []string{
-		roleStyle(m.currentTheme().header).Render("Administrator password"),
+		m.roleStyle(m.currentTheme().header).Render("Administrator password"),
 		body,
 		"Password: " + m.password.View(),
-		roleStyle(m.currentTheme().footer).Render("Enter: submit  Esc: cancel"),
+		m.roleStyle(m.currentTheme().footer).Render("Enter: submit  Esc: cancel"),
 	}
 	return m.modalStyle().Render(strings.Join(lines, "\n"))
 }

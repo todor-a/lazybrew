@@ -35,7 +35,7 @@ func TestMinimumSizeAndExactThirtyCellFooter(t *testing.T) {
 		t.Fatalf("footer row width=%d, want 32", len(footerRunes))
 	}
 	got := string(footerRunes[1:31])
-	want := "Search: / | Switch: tab | Unin"
+	want := "Search: / · Switch: tab · Unin"
 	if got != want {
 		t.Fatalf("footer interior=%q, want %q", got, want)
 	}
@@ -106,17 +106,25 @@ func TestThemeCycleAndRoleTable(t *testing.T) {
 			m.Update(textKey("t"))
 		}
 	}
-	if themes[0].border.foreground != "2" || themes[0].selected.background != "4" || themes[0].selected.foreground != "" {
-		t.Fatalf("Lazygit role colors changed: %#v", themes[0])
+	if themes[0].selected.background.dark != "#316dca" || themes[0].selected.foreground.dark != "#ffffff" {
+		t.Fatalf("Lazygit selected colors changed: %#v", themes[0].selected)
 	}
-	if themes[1].header.foreground != "0" || themes[1].header.background != "6" {
-		t.Fatalf("Bright header colors changed: %#v", themes[1].header)
+	if themes[3].selected.background.dark != "#44475a" || themes[3].selected.background.light != "#644ac9" {
+		t.Fatalf("Dracula selected colors changed: %#v", themes[3].selected)
 	}
-	if themes[2].selected.foreground != "0" || themes[2].selected.background != "6" {
-		t.Fatalf("Ocean selected colors changed: %#v", themes[2].selected)
-	}
-	if themes[3].footer.foreground != "3" || themes[3].footer.background != "0" {
-		t.Fatalf("Dracula footer colors changed: %#v", themes[3].footer)
+	// Every color a theme sets names both variants: a role that resolves on only
+	// one background is the light-terminal black-bar bug in a new coat.
+	for _, candidate := range themes {
+		for role, pair := range map[string]colorPair{
+			"border": candidate.border, "header": candidate.header, "selected": candidate.selected,
+			"status": candidate.status, "footer": candidate.footer, "search": candidate.search,
+		} {
+			for _, half := range []adaptive{pair.foreground, pair.background} {
+				if (half.light == "") != (half.dark == "") {
+					t.Fatalf("%s %s sets only one variant: %#v", candidate.name, role, half)
+				}
+			}
+		}
 	}
 }
 
@@ -422,7 +430,7 @@ func TestFooterListsEveryNormalKey(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q"
+	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Sort: o · Theme: t · Refresh: r · Quit: q"
 	if footer != want {
 		t.Fatalf("footer=%q, want %q", footer, want)
 	}
@@ -759,7 +767,7 @@ func TestFooterKeepsItsBackgroundAcrossTheWholeRow(t *testing.T) {
 			bright = i
 		}
 	}
-	if bright < 0 || themes[bright].footer.background == "" {
+	if bright < 0 || themes[bright].footer.background.dark == "" {
 		t.Fatal("no theme with a footer background left to exercise this")
 	}
 	m.themeIndex = bright
@@ -768,7 +776,8 @@ func TestFooterKeepsItsBackgroundAcrossTheWholeRow(t *testing.T) {
 	if got := lipgloss.Width(row); got != m.width-2 {
 		t.Fatalf("footer width=%d, want %d", got, m.width-2)
 	}
-	armed, hasPadding := backgroundActiveAtTrailingBlanks(row, "47")
+	// Adaptive hexes render as truecolor backgrounds: any 48;2;r;g;b sequence.
+	armed, hasPadding := backgroundActiveAtTrailingBlanks(row, "48;2;")
 	if !hasPadding {
 		t.Fatalf("no padding at width %d, so this asserts nothing", m.width-2)
 	}

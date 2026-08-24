@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "lazybrew settings",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "theme": {
+      "type": "string",
+      "enum": ["Lazygit", "Bright", "Ocean", "Dracula"],
+      "description": "Color theme. Cycle in-app with t."
+    }
+  }
+}

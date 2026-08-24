@@ -351,7 +351,12 @@ type model struct {
 	width, height int
 	contentRows   int
 	themeIndex    int
+	settingsPath  string
 	monochrome    bool
+	// isDark picks each adaptive color's variant. It defaults to true and is
+	// corrected by the terminal's tea.BackgroundColorMsg reply: most terminals
+	// are dark, and a wrong first frame recolors rather than breaks.
+	isDark bool
 
 	list     list.Model
 	help     help.Model
@@ -397,7 +402,10 @@ type model struct {
 }
 
 // New constructs the complete UI and the supervisor retained by main.
-func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner) (tea.Model, *Supervisor) {
+// settingsDir is where settings live (~/lazybrew in main); empty disables
+// settings persistence.
+func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, settingsDir string) (tea.Model, *Supervisor) {
+	settingsPath := settingsFile(settingsDir)
 	items := list.New(nil, packageDelegate{}, 0, 0)
 	items.SetShowTitle(false)
 	items.SetShowFilter(false)
@@ -426,6 +434,9 @@ func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner) 
 		spinner:       sp,
 		password:      blankPasswordInput(),
 		monochrome:    os.Getenv("NO_COLOR") != "",
+		isDark:        true,
+		settingsPath:  settingsPath,
+		themeIndex:    themeIndexByName(ensureSettings(settingsPath).Theme),
 		loading:       true,
 		loadPurpose:   loadStartup,
 		spinnerActive: true,
@@ -451,13 +462,16 @@ func substringFilter(term string, targets []string) []list.Rank {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.startList(loadStartup, 0), m.startSizes(), m.spinner.Tick)
+	return tea.Batch(m.startList(loadStartup, 0), m.startSizes(), m.spinner.Tick, tea.RequestBackgroundColor)
 }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
 		return m, m.resize(msg.Width, msg.Height)
+	case tea.BackgroundColorMsg:
+		m.isDark = msg.IsDark()
+		return m, nil
 	case tea.ColorProfileMsg:
 		profile := msg.Profile.String()
 		m.monochrome = os.Getenv("NO_COLOR") != "" ||
@@ -595,6 +609,7 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	case "t", "T":
 		m.themeIndex = (m.themeIndex + 1) % len(themes)
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
+		saveSettings(m.settingsPath, settings{Theme: themes[m.themeIndex].name})
 	case "a", "A":
 		m.showDeps = !m.showDeps
 		// Casks have no dependency relation, so only the status changes there. The
@@ -1285,13 +1300,13 @@ func (m *model) resize(width, height int) tea.Cmd {
 	m.contentRows = max(0, height-7)
 	paneWidth := max(0, width-2)
 	if width >= 72 {
-		paneWidth = max(0, width/2-1)
+		paneWidth = max(0, splitColumn(width)-1)
 	}
 	selection := m.list.Index()
 	m.list.SetSize(paneWidth, m.contentRows)
 	m.clampSelection(selection)
 	m.help.SetWidth(max(0, width-2))
-	m.viewport.SetWidth(max(0, width-width/2-2))
+	m.viewport.SetWidth(max(0, width-splitColumn(width)-2))
 	m.viewport.SetHeight(max(0, m.contentRows-1))
 	if m.mode == modePassword {
 		m.password.SetWidth(max(1, min(40, width-16)))
