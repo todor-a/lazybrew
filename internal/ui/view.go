@@ -483,6 +483,10 @@ func (m *model) infoLines(width, height int) []string {
 		if m.loading && height > 0 {
 			lines[0] = fit(info.LoadingText, width)
 		}
+		// The queue block must survive an empty selection: a search that
+		// matches nothing mid-run would otherwise hide the only view of what
+		// is still executing and waiting.
+		m.overlayQueue(lines, width, height)
 		return lines
 	}
 	if height > 0 {
