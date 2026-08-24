@@ -384,10 +384,22 @@ type model struct {
 	status       string
 	priority     bool
 	confirmation *brew.Package
-	operation    *brew.Package
-	// verb is captured with the confirmation snapshot and is as immutable as the
-	// snapshot: every user-facing string and the argv both derive from it, so a
-	// later selection change cannot retarget an in-flight operation's wording.
+	// confirmVerb is the verb the open confirmation dialog is asking about. It
+	// is separate from verb because a dialog can open while a job runs, and
+	// writing the dialog's verb over the running job's would retarget every
+	// user-facing string of an operation already in flight.
+	confirmVerb brew.Operation
+	operation   *brew.Package
+	// queue holds confirmed operations waiting for the running job to finish.
+	// Entries carry their own immutable snapshot and verb, taken at
+	// confirmation time exactly as a directly-started job's are. FIFO, run
+	// strictly serially: brew does not support concurrent mutations, and the
+	// job plumbing below is single-slot by design.
+	queue []queuedOperation
+	// verb is the running job's verb, captured when the job starts and as
+	// immutable as its snapshot: every user-facing string and the argv both
+	// derive from it, so a later selection change cannot retarget an in-flight
+	// operation's wording.
 	verb             brew.Operation
 	operationID      uint64
 	operationCancel  context.CancelFunc
@@ -623,6 +635,59 @@ func cleanupFailedStatus(op brew.Operation, err string) string {
 // naming the window browse-only.
 func (m *model) jobRunning() bool { return m.operation != nil }
 
+// queuedOperation is one confirmed, not-yet-started operation.
+type queuedOperation struct {
+	verb brew.Operation
+	pkg  brew.Package
+}
+
+// pendingOperation reports whether the same verb is already running or queued
+// for the same package. That request adds no work, only a duplicate
+// destructive entry, so confirmOperation refuses it instead of double-queuing.
+func (m *model) pendingOperation(op brew.Operation, pkg brew.Package) bool {
+	if m.jobRunning() && m.verb == op && m.operation.Kind == pkg.Kind && m.operation.Name == pkg.Name {
+		return true
+	}
+	for _, entry := range m.queue {
+		if entry.verb == op && entry.pkg.Kind == pkg.Kind && entry.pkg.Name == pkg.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// isQueued marks list rows; the running row carries the spinner instead.
+func (m *model) isQueued(pkg brew.Package) bool {
+	for _, entry := range m.queue {
+		if entry.pkg.Kind == pkg.Kind && entry.pkg.Name == pkg.Name {
+			return true
+		}
+	}
+	return false
+}
+
+// dropQueue empties the queue and reports what it held. Every path that ends a
+// job in anything but success calls it: destructive work must never continue
+// past a failure or a cancel signal the user aimed at the run.
+func (m *model) dropQueue() int {
+	dropped := len(m.queue)
+	m.queue = nil
+	return dropped
+}
+
+// queueDropSuffix names the collateral of a failed or cancelled job. Dropping
+// queued entries silently would read as work done.
+func queueDropSuffix(dropped int) string {
+	if dropped == 0 {
+		return ""
+	}
+	return " · " + strconv.Itoa(dropped) + " queued dropped"
+}
+
+func queuedStatus(op brew.Operation, name string) string {
+	return "Queued " + words(op).lower + " " + name
+}
+
 func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	switch key.String() {
 	case "up", "k":
@@ -710,12 +775,6 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 // snapshot, and the fit check are the security-relevant parts and must never be
 // re-derived per verb.
 func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
-	// One job at a time. The verb, snapshot, and cancel plumbing are all
-	// singular by design, so a second confirmation mid-job is dead rather than
-	// queued.
-	if m.jobRunning() {
-		return nil
-	}
 	selected := m.selectedPackage()
 	if selected == nil {
 		return nil
@@ -727,13 +786,22 @@ func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
 		m.status, m.priority = selected.Name+" is up to date", false
 		return nil
 	}
+	// The same verb already running or queued for the same package is refused,
+	// not double-queued: the job plumbing stays single-slot and the queue runs
+	// strictly serially (brew does not support concurrent mutations), so the
+	// duplicate could only run the verb a second time against a package the
+	// first run already handled.
+	if m.pendingOperation(op, *selected) {
+		m.status, m.priority = selected.Name+" already queued", false
+		return nil
+	}
 	if !m.confirmationFits(*selected) {
 		m.status, m.priority = "Widen terminal to confirm", true
 		return nil
 	}
 	snapshot := *selected
 	m.confirmation = &snapshot
-	m.verb = op
+	m.confirmVerb = op
 	m.mode = modeConfirm
 	m.status, m.priority = confirmTitle(op), true
 	return nil
@@ -808,16 +876,31 @@ func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
 func (m *model) updateConfirmation(key tea.KeyPressMsg) tea.Cmd {
 	snapshot := m.confirmation
 	m.confirmation = nil
+	// The dialog returns to the window it opened over: plain browsing, or
+	// browsing under a running job.
+	resume := modeNormal
+	if m.jobRunning() {
+		resume = modeOperation
+	}
 	if key.Key().Text != "y" || snapshot == nil {
-		m.mode = modeNormal
-		m.status, m.priority = cancelledStatus(m.verb), true
+		m.mode = resume
+		m.status, m.priority = cancelledStatus(m.confirmVerb), true
 		return nil
 	}
 	if !m.confirmationFits(*snapshot) {
-		m.mode = modeNormal
-		m.status, m.priority = tooSmallStatus(m.verb), true
+		m.mode = resume
+		m.status, m.priority = tooSmallStatus(m.confirmVerb), true
 		return nil
 	}
+	// Mid-job the confirmed entry queues instead of starting: one job at a
+	// time is the invariant, the queue is how a second request waits its turn.
+	if m.jobRunning() {
+		m.queue = append(m.queue, queuedOperation{verb: m.confirmVerb, pkg: *snapshot})
+		m.mode = modeOperation
+		m.status, m.priority = queuedStatus(m.confirmVerb, snapshot.Name), true
+		return nil
+	}
+	m.verb = m.confirmVerb
 	return m.startUninstall(*snapshot)
 }
 
@@ -963,6 +1046,7 @@ func (m *model) handleJobStartFailed(msg jobStartFailedMsg) tea.Cmd {
 	} else {
 		m.status = startFailedStatus(m.verb)
 	}
+	m.status += queueDropSuffix(m.dropQueue())
 	m.priority = true
 	return nil
 }
@@ -988,7 +1072,7 @@ func (m *model) handleJobEvent(msg jobEventMsg) tea.Cmd {
 	if !msg.open {
 		return nil
 	}
-	if msg.event.Type != privileged.PasswordRequested || m.mode != modeOperation || m.cancelReason != cancelNone {
+	if msg.event.Type != privileged.PasswordRequested || (m.mode != modeOperation && m.mode != modeConfirm) || m.cancelReason != cancelNone {
 		if m.mode == modePassword {
 			m.wipePassword()
 			m.mode = modeOperation
@@ -997,6 +1081,14 @@ func (m *model) handleJobEvent(msg jobEventMsg) tea.Cmd {
 		}
 		m.job.Cancel()
 		return waitJobEvent(msg.id, m.jobEvents)
+	}
+	// An auth prompt arriving under an open enqueue dialog takes the window:
+	// sudo's prompt is time-boxed, the dialog is cheap to re-request. The
+	// pending confirmation is dropped rather than silently enqueued - a
+	// half-confirmed destructive entry must never survive a mode hijack.
+	if m.mode == modeConfirm {
+		m.confirmation = nil
+		m.status, m.priority = cancelledStatus(m.confirmVerb), true
 	}
 	m.passwordAttempts++
 	m.passwordRequest = msg.event.RequestID
@@ -1046,6 +1138,17 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 	case result.Err != nil:
 		m.finishOperation(flattenStatus(result.Err.Error()))
 	default:
+		// One invalidate+reload for the whole run, when the queue drains: each
+		// pop starts the next job directly, so the list stays browse-only and
+		// deliberately stale mid-queue - the same contract a single job's
+		// window has. A reload here would also be invalidated again by the
+		// very next job.
+		if len(m.queue) > 0 {
+			next := m.queue[0]
+			m.queue = m.queue[1:]
+			m.verb = next.verb
+			return m.startUninstall(next.pkg)
+		}
 		selection := m.list.Index()
 		sizesCmd := m.invalidateCaches()
 		m.mode = modeOperation
@@ -1057,7 +1160,7 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 
 func (m *model) finishOperation(status string) {
 	m.mode = modeNormal
-	m.status, m.priority = status, true
+	m.status, m.priority = status+queueDropSuffix(m.dropQueue()), true
 	m.operation = nil
 	m.cancelReason = cancelNone
 }
@@ -1495,7 +1598,10 @@ func (m *model) resize(width, height int) tea.Cmd {
 	if m.confirmation != nil && !m.confirmationFits(*m.confirmation) {
 		m.confirmation = nil
 		m.mode = modeNormal
-		m.status, m.priority = tooSmallStatus(m.verb), true
+		if m.jobRunning() {
+			m.mode = modeOperation
+		}
+		m.status, m.priority = tooSmallStatus(m.confirmVerb), true
 	}
 	if m.operation != nil && !m.confirmationFits(*m.operation) && m.cancelReason == cancelNone {
 		m.cancelReason = cancelTerminal
