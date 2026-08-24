@@ -251,7 +251,7 @@ type Model interface {
 Use:
 
 - Bubbles `list` for item selection, exact custom filtering, and list-compatible navigation.
-- Bubbles `help` to render the mode-specific footer bindings.
+- Bubbles `help` to render the mode-specific footer bindings, with its short separator and short key/description styles supplied rather than blanked.
 - Bubbles `viewport` with `SoftWrap = true` for package info.
 - Bubbles `spinner` while uninstall or a package-list reload is active.
 - Bubbles `textinput` with `EchoPassword` for password entry. The search filter may use the list's filter input, but must satisfy the exact search contract above.
@@ -271,9 +271,15 @@ Do not use Huh or another modal package. `View` is pure: it renders state and mu
 6. One status row.
 7. One footer/help row.
 
-The normal footer's exact logical string is `[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. **[REWRITE ADDITION]** `tab switch` sits second, next to the other list-navigation key; parity omitted `tab` from the footer entirely and taught it only in the header. **[REWRITE ADDITION]** `d deps` and `o sort` are inserted after `r refresh` specifically so the 30-cell prefix asserted below is unchanged; that prefix is a standing constraint on where any future binding may be inserted.
+The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: u | Deps: d | Sort: o | Theme: t | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels.
 
-Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `[/ or s] search  tab switch  u`: cell 30 is the `u` of `u uninstall`. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
+**[REWRITE ADDITION]** The action leads and the key answers it, joined by ` | `, replacing parity's key-first `<key> <label>` pairs separated by two spaces. A footer is read by someone looking for a verb, not by someone scanning single letters. `Search:` advertises `/` alone; `s` and `S` still work and are still bound, they are simply not spelled out.
+
+The label occupies each binding's help-key slot and the keystroke its description slot, which is the reverse of those field names. Bubbles renders key-then-description with no option to swap them, and these bindings are already display-only: nothing dispatches through them, and the progress and cancel entries carry no real key at all. The footer styles compensate, so the keystroke remains the emphasised half.
+
+The footer is two-tone: the action in the footer role, the keystroke bold, the separator faint. Every segment carries the complete role rather than relying on an enclosing style, and the trailing pad is rendered through that role too. A single enclosing style over pre-styled segments ends its own background at the first inner reset, which is visible as a bare strip on any theme whose footer has a background.
+
+Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `Search: / | Switch: tab | Unin`: the clip falls inside `Uninstall:`. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
 Package rows render a selection marker, a freshness cell, name, kind, and optional version. **[REWRITE ADDITION]** The row shape is ` <marker><freshness> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row and `<freshness>` is one fixed cell holding `↑` for a package `brew outdated` reports and a space otherwise. This replaces the earlier ` <marker> <name-column> <kind>[ <version>]`, which had no cell for the outdated verdict. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
 
@@ -533,10 +539,10 @@ The key, priority-status, and footer contracts while a list command is active ar
 
 | Load state | Priority status with active spinner | Footer | Ordinary keys |
 |---|---|---|---|
-| Startup cask load | `Loading casks...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Kind-switch load | `Loading casks...` or `Loading formulae...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Cached kind switch | none; no command runs | `[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
-| User refresh | `Refreshing casks...` or `Refreshing formulae...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
+| Startup cask load | `Loading casks...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
+| Kind-switch load | `Loading casks...` or `Loading formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
+| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: u | Deps: d | Sort: o | Theme: t | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
+| User refresh | `Refreshing casks...` or `Refreshing formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Post-uninstall reload | `Reloading casks...` or `Reloading formulae...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
 
 `tea.WindowSizeMsg` and the global interrupt contract are handled in every row. Startup, switch, and refresh return to normal mode on their list result. Post-uninstall reload remains uninstall-progress mode with the list frozen and controls disabled until its result establishes final success or failure.
@@ -639,7 +645,7 @@ The model gains the operation alongside its existing snapshot, and about ten SPE
 
 `Cancelling <name>...`, `Widen terminal to confirm`, `Administrator authentication failed`, and `Administrator authentication timed out` are shared and unchanged. The lowercase-`y`-only confirmation discipline is reused verbatim and must never be re-derived. The fit check that guards the confirmation and password dialogs must measure the longest of **both** verb sets, so a terminal wide enough to confirm one verb cannot be too narrow to render the other mid-operation.
 
-Key `g` starts an upgrade. The footer becomes `[/ or s] search  tab switch  u uninstall  g upgrade  t theme  r refresh  q quit`, with `g upgrade` immediately after `u uninstall`. That changes the section 6 exact 30-cell prefix at width 32 only if the new key is inserted before cell 30; it is not — `g upgrade` sits after `u uninstall`, so the 30-cell prefix `[/ or s] search  tab switch  u` is unchanged.
+Key `g` starts an upgrade. The footer gains `Upgrade: g` immediately after `Uninstall: u`. That falls after cell 30, so the section 6 exact 30-cell prefix at width 32, `Search: / | Switch: tab | Unin`, is unchanged; that prefix is a standing constraint on where any future binding may be inserted.
 
 `g` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the non-priority status `<name> is up to date`. The destructive machinery stays unreachable for an operation that would be a no-op, and the freshness cell from section 6 is exactly the affordance that tells the user which rows `g` will act on.
 
