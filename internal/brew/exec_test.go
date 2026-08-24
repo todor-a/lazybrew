@@ -155,9 +155,9 @@ func TestPrepareUninstallVectorsAndPATHResolution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := configureFakeBrew(t, "", "", 0, false)
-			prepared, err := PrepareUninstall(os.Environ(), tt.pkg)
+			prepared, err := PrepareCommand(os.Environ(), Uninstall, tt.pkg)
 			if err != nil {
-				t.Fatalf("PrepareUninstall() error = %v", err)
+				t.Fatalf("PrepareCommand() error = %v", err)
 			}
 			wantPath := strings.TrimSuffix(argsFile, ".args")
 			if prepared.Path != wantPath {
@@ -179,9 +179,9 @@ func TestPrepareUninstallUsesOnlySuppliedPATH(t *testing.T) {
 	hostPath := t.TempDir()
 	t.Setenv("PATH", hostPath)
 
-	resolved, err := PrepareUninstall([]string{"PATH=" + filepath.Dir(childPath)}, Package{Name: "safe", Kind: Cask})
+	resolved, err := PrepareCommand([]string{"PATH=" + filepath.Dir(childPath)}, Uninstall, Package{Name: "safe", Kind: Cask})
 	if err != nil {
-		t.Fatalf("PrepareUninstall() error = %v", err)
+		t.Fatalf("PrepareCommand() error = %v", err)
 	}
 	if resolved.Path != childPath {
 		t.Fatalf("Path = %q, want child-only path %q", resolved.Path, childPath)
@@ -192,7 +192,7 @@ func TestPrepareUninstallUsesOnlySuppliedPATH(t *testing.T) {
 }
 
 func TestPrepareUninstallRejectsMissingAndRelativePATH(t *testing.T) {
-	_, err := PrepareUninstall([]string{"PATH=" + t.TempDir()}, Package{Name: "safe", Kind: Cask})
+	_, err := PrepareCommand([]string{"PATH=" + t.TempDir()}, Uninstall, Package{Name: "safe", Kind: Cask})
 	if err == nil || err.Error() != missingBrewMessage {
 		t.Fatalf("missing PATH error = %v", err)
 	}
@@ -214,7 +214,7 @@ func TestPrepareUninstallRejectsMissingAndRelativePATH(t *testing.T) {
 		}
 	})
 
-	_, err = PrepareUninstall([]string{"PATH=."}, Package{Name: "safe", Kind: Cask})
+	_, err = PrepareCommand([]string{"PATH=."}, Uninstall, Package{Name: "safe", Kind: Cask})
 	if !errors.Is(err, exec.ErrDot) {
 		t.Fatalf("relative PATH error = %v, want exec.ErrDot", err)
 	}
@@ -250,7 +250,7 @@ func TestMissingBrewErrors(t *testing.T) {
 		{
 			name: "uninstall preparation",
 			run: func() error {
-				_, err := PrepareUninstall(os.Environ(), Package{Name: "safe", Kind: Cask})
+				_, err := PrepareCommand(os.Environ(), Uninstall, Package{Name: "safe", Kind: Cask})
 				return err
 			},
 		},
@@ -575,5 +575,51 @@ func TestReadsSuppressHomebrewAutoUpdateInTheChildEnvironment(t *testing.T) {
 				t.Fatalf("child HOMEBREW_NO_AUTO_UPDATE = %q, want \"1\"", got)
 			}
 		})
+	}
+}
+
+// One argv builder for both privileged verbs. A second builder for either verb
+// must never exist, so this pins both vectors and the per-operation refusal.
+func TestPrepareCommandBuildsBothVerbsThroughOneSeam(t *testing.T) {
+	configureFakeBrew(t, "", "", 0, false)
+	for _, tt := range []struct {
+		name string
+		op   Operation
+		pkg  Package
+		want []string
+	}{
+		{"uninstall cask", Uninstall, Package{Name: "alpha", Kind: Cask}, []string{"uninstall", "--cask", "alpha"}},
+		{"uninstall formula", Uninstall, Package{Name: "alpha", Kind: Formula}, []string{"uninstall", "--formula", "alpha"}},
+		{"upgrade cask", Upgrade, Package{Name: "alpha", Kind: Cask}, []string{"upgrade", "--cask", "alpha"}},
+		{"upgrade formula", Upgrade, Package{Name: "alpha", Kind: Formula}, []string{"upgrade", "--formula", "alpha"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prepared, err := PrepareCommand(os.Environ(), tt.op, tt.pkg)
+			if err != nil {
+				t.Fatalf("PrepareCommand() error = %v", err)
+			}
+			if !slices.Equal(prepared.Args, tt.want) {
+				t.Fatalf("argv = %#v, want %#v", prepared.Args, tt.want)
+			}
+		})
+	}
+}
+
+func TestPrepareCommandRefusesPerOperationAndRejectsAnInvalidOne(t *testing.T) {
+	configureFakeBrew(t, "", "", 0, false)
+	for _, tt := range []struct {
+		op   Operation
+		want string
+	}{
+		{Uninstall, "Unsafe package name; uninstall refused"},
+		{Upgrade, "Unsafe package name; upgrade refused"},
+	} {
+		_, err := PrepareCommand(os.Environ(), tt.op, Package{Name: "-rf", Kind: Cask})
+		if err == nil || err.Error() != tt.want {
+			t.Fatalf("PrepareCommand(%v) error = %v, want %q", tt.op, err, tt.want)
+		}
+	}
+	if _, err := PrepareCommand(os.Environ(), Operation(9), Package{Name: "alpha", Kind: Cask}); err != errInvalidOperation {
+		t.Fatalf("PrepareCommand() error = %v, want %v", err, errInvalidOperation)
 	}
 }

@@ -265,9 +265,9 @@ func TestUnsafePackageNamesAreRefusedBeforeInfoOrUninstall(t *testing.T) {
 			}
 
 			t.Setenv("PATH", t.TempDir())
-			_, err = PrepareUninstall(os.Environ(), Package{Name: name, Kind: Cask})
+			_, err = PrepareCommand(os.Environ(), Uninstall, Package{Name: name, Kind: Cask})
 			if err == nil || err.Error() != "Unsafe package name; uninstall refused" {
-				t.Fatalf("PrepareUninstall() error = %v", err)
+				t.Fatalf("PrepareCommand() error = %v", err)
 			}
 		})
 	}
@@ -307,8 +307,8 @@ func TestInvalidKindStartsNoCommand(t *testing.T) {
 	if _, err := New().Info(context.Background(), Package{Name: "safe", Kind: invalid}); err == nil {
 		t.Error("Info() accepted invalid kind")
 	}
-	if _, err := PrepareUninstall(os.Environ(), Package{Name: "safe", Kind: invalid}); err == nil {
-		t.Error("PrepareUninstall() accepted invalid kind")
+	if _, err := PrepareCommand(os.Environ(), Uninstall, Package{Name: "safe", Kind: invalid}); err == nil {
+		t.Error("PrepareCommand() accepted invalid kind")
 	}
 	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid kind started brew; marker error = %v", err)

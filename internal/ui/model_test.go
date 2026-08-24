@@ -13,7 +13,7 @@ import (
 
 	"lazybrew/internal/brew"
 	"lazybrew/internal/info"
-	"lazybrew/internal/uninstall"
+	"lazybrew/internal/privileged"
 )
 
 type fakeHomebrew struct {
@@ -85,6 +85,7 @@ func (f *fakeHomebrew) Uses(_ context.Context, pkg brew.Package) ([]string, erro
 }
 
 type fakeUninstaller struct {
+	startedOps   []brew.Operation
 	job          *fakeJob
 	starts       int
 	started      []brew.Package
@@ -92,9 +93,10 @@ type fakeUninstaller struct {
 	startStarted chan struct{}
 }
 
-func (f *fakeUninstaller) Start(ctx context.Context, pkg brew.Package) (uninstall.Job, error) {
+func (f *fakeUninstaller) Start(ctx context.Context, op brew.Operation, pkg brew.Package) (privileged.Job, error) {
 	f.starts++
 	f.started = append(f.started, pkg)
+	f.startedOps = append(f.startedOps, op)
 	if f.startStarted != nil {
 		close(f.startStarted)
 		<-ctx.Done()
@@ -106,19 +108,19 @@ func (f *fakeUninstaller) Start(ctx context.Context, pkg brew.Package) (uninstal
 }
 
 type fakeJob struct {
-	events      chan uninstall.Event
-	result      chan uninstall.Result
+	events      chan privileged.Event
+	result      chan privileged.Result
 	once        sync.Once
 	mu          sync.Mutex
 	passwords   [][]byte
-	passwordIDs []uninstall.RequestID
-	terminal    *uninstall.Result
+	passwordIDs []privileged.RequestID
+	terminal    *privileged.Result
 }
 
 // setTerminal programs the result this job terminates with, including when it is
 // cancelled. A real job asked to stop during cleanup still reports whatever
 // actually happened, so a cancel does not overwrite a programmed terminal result.
-func (j *fakeJob) setTerminal(result uninstall.Result) {
+func (j *fakeJob) setTerminal(result privileged.Result) {
 	j.mu.Lock()
 	j.terminal = &result
 	j.mu.Unlock()
@@ -126,13 +128,13 @@ func (j *fakeJob) setTerminal(result uninstall.Result) {
 
 func newFakeJob() *fakeJob {
 	return &fakeJob{
-		events: make(chan uninstall.Event, 4),
-		result: make(chan uninstall.Result, 1),
+		events: make(chan privileged.Event, 4),
+		result: make(chan privileged.Result, 1),
 	}
 }
 
-func (j *fakeJob) Events() <-chan uninstall.Event { return j.events }
-func (j *fakeJob) RespondPassword(id uninstall.RequestID, password []byte) error {
+func (j *fakeJob) Events() <-chan privileged.Event { return j.events }
+func (j *fakeJob) RespondPassword(id privileged.RequestID, password []byte) error {
 	j.mu.Lock()
 	j.passwordIDs = append(j.passwordIDs, id)
 	j.passwords = append(j.passwords, append([]byte(nil), password...))
@@ -142,7 +144,7 @@ func (j *fakeJob) RespondPassword(id uninstall.RequestID, password []byte) error
 	}
 	return nil
 }
-func (j *fakeJob) CancelPassword(uninstall.RequestID) error { return nil }
+func (j *fakeJob) CancelPassword(privileged.RequestID) error { return nil }
 func (j *fakeJob) Cancel() {
 	j.mu.Lock()
 	programmed := j.terminal
@@ -151,10 +153,10 @@ func (j *fakeJob) Cancel() {
 		j.finish(*programmed)
 		return
 	}
-	j.finish(uninstall.Result{Cancelled: true})
+	j.finish(privileged.Result{Cancelled: true})
 }
-func (j *fakeJob) Wait() uninstall.Result { return <-j.result }
-func (j *fakeJob) finish(result uninstall.Result) {
+func (j *fakeJob) Wait() privileged.Result { return <-j.result }
+func (j *fakeJob) finish(result privileged.Result) {
 	j.once.Do(func() {
 		j.result <- result
 		close(j.result)
@@ -284,7 +286,7 @@ func TestSearchIsModeFirstSubstringAndNonWrapping(t *testing.T) {
 
 func TestConfirmationRequiresExactLowercaseYAndStartsAsynchronously(t *testing.T) {
 	m, uninstaller := newTestModel(t)
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	if m.mode != modeConfirm || m.confirmation == nil || m.confirmation.Name != "Alpha" {
 		t.Fatalf("confirmation snapshot not opened: mode=%v snapshot=%#v", m.mode, m.confirmation)
 	}
@@ -293,12 +295,12 @@ func TestConfirmationRequiresExactLowercaseYAndStartsAsynchronously(t *testing.T
 		t.Fatalf("uppercase Y did not cancel exactly: mode=%v status=%q starts=%d", m.mode, m.status, uninstaller.starts)
 	}
 
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	_, command := m.Update(textKey("y"))
 	if uninstaller.starts != 0 {
 		t.Fatal("Start ran inside Update")
 	}
-	if m.mode != modeUninstall || m.status != "Uninstalling Alpha..." || !m.spinnerActive {
+	if m.mode != modeOperation || m.status != "Uninstalling Alpha..." || !m.spinnerActive {
 		t.Fatalf("start state not committed before command: mode=%v status=%q spinner=%v", m.mode, m.status, m.spinnerActive)
 	}
 	messages := immediateMessages(command)
@@ -310,12 +312,12 @@ func TestConfirmationRequiresExactLowercaseYAndStartsAsynchronously(t *testing.T
 			m.Update(started)
 		}
 	}
-	uninstaller.job.finish(uninstall.Result{Err: errors.New("brew failed")})
+	uninstaller.job.finish(privileged.Result{Err: errors.New("brew failed")})
 }
 
 func TestPasswordDropsPasteUsesFreshMaskedInputAndSubmitsDirectly(t *testing.T) {
 	m, uninstaller := newTestModel(t)
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	_, command := m.Update(textKey("y"))
 	for _, message := range immediateMessages(command) {
 		if started, ok := message.(jobStartedMsg); ok {
@@ -323,8 +325,8 @@ func TestPasswordDropsPasteUsesFreshMaskedInputAndSubmitsDirectly(t *testing.T) 
 		}
 	}
 
-	request := uninstall.RequestID{1}
-	m.Update(jobEventMsg{id: m.operationID, event: uninstall.Event{Type: uninstall.PasswordRequested, RequestID: request}, open: true})
+	request := privileged.RequestID{1}
+	m.Update(jobEventMsg{id: m.operationID, event: privileged.Event{Type: privileged.PasswordRequested, RequestID: request}, open: true})
 	if m.mode != modePassword || m.password.Value() != "" || !m.password.Focused() {
 		t.Fatalf("password request did not create fresh focused input")
 	}
@@ -335,18 +337,18 @@ func TestPasswordDropsPasteUsesFreshMaskedInputAndSubmitsDirectly(t *testing.T) 
 		t.Fatalf("paste/delete changed password value, got %q", m.password.Value())
 	}
 	m.Update(specialKey(tea.KeyEnter))
-	if m.mode != modeUninstall || m.password.Value() != "" || m.password.Focused() {
+	if m.mode != modeOperation || m.password.Value() != "" || m.password.Focused() {
 		t.Fatal("submit did not immediately reset and blur password input")
 	}
 	uninstaller.job.mu.Lock()
 	got := string(uninstaller.job.passwords[0])
 	gotRequest := uninstaller.job.passwordIDs[0]
 	uninstaller.job.mu.Unlock()
-	if got != "密" || gotRequest != request || gotRequest == (uninstall.RequestID{}) {
+	if got != "密" || gotRequest != request || gotRequest == (privileged.RequestID{}) {
 		t.Fatalf("submitted password=%q request=%x, want %q request=%x", got, gotRequest, "密", request)
 	}
 
-	m.Update(jobEventMsg{id: m.operationID, event: uninstall.Event{Type: uninstall.PasswordRequested, RequestID: uninstall.RequestID{2}}, open: true})
+	m.Update(jobEventMsg{id: m.operationID, event: privileged.Event{Type: privileged.PasswordRequested, RequestID: privileged.RequestID{2}}, open: true})
 	if m.password.Value() != "" || m.passwordAttempts != 2 {
 		t.Fatalf("retry was not fresh: value=%q attempts=%d", m.password.Value(), m.passwordAttempts)
 	}
@@ -368,24 +370,24 @@ func TestLoadingModesAcceptOnlySpecifiedQuitKeys(t *testing.T) {
 
 	m2, _ := newTestModel(t)
 	m2.loading = true
-	m2.loadPurpose = loadAfterUninstall
-	m2.mode = modeUninstall
+	m2.loadPurpose = loadAfterOperation
+	m2.mode = modeOperation
 	m2.Update(textKey("q"))
-	if m2.mode != modeUninstall {
+	if m2.mode != modeOperation {
 		t.Fatal("q escaped post-uninstall reload")
 	}
 }
 
 func TestResizeCancelsUnsafeConfirmationAndActiveUninstall(t *testing.T) {
 	m, _ := newTestModel(t)
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	m.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
 	if m.mode != modeNormal || m.confirmation != nil || m.status != "Terminal too small; uninstall cancelled" {
 		t.Fatalf("unsafe confirmation survived resize: mode=%v confirmation=%#v status=%q", m.mode, m.confirmation, m.status)
 	}
 
 	m2, uninstaller := newTestModel(t)
-	m2.Update(textKey("u"))
+	m2.Update(textKey("d"))
 	_, command := m2.Update(textKey("y"))
 	for _, message := range immediateMessages(command) {
 		if started, ok := message.(jobStartedMsg); ok {
@@ -401,7 +403,7 @@ func TestResizeCancelsUnsafeConfirmationAndActiveUninstall(t *testing.T) {
 
 func startFakeUninstall(t *testing.T, m *model, uninstaller *fakeUninstaller) {
 	t.Helper()
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	_, command := m.Update(textKey("y"))
 	for _, message := range immediateMessages(command) {
 		if started, ok := message.(jobStartedMsg); ok {
@@ -417,7 +419,7 @@ func TestUninstallStartAndTerminalFailuresRestoreControls(t *testing.T) {
 	t.Run("start", func(t *testing.T) {
 		m, uninstaller := newTestModel(t)
 		uninstaller.err = errors.New("setup failed")
-		m.Update(textKey("u"))
+		m.Update(textKey("d"))
 		_, command := m.Update(textKey("y"))
 		for _, message := range immediateMessages(command) {
 			if failed, ok := message.(jobStartFailedMsg); ok {
@@ -435,12 +437,12 @@ func TestUninstallStartAndTerminalFailuresRestoreControls(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		result uninstall.Result
+		result privileged.Result
 		status string
 	}{
-		{name: "command", result: uninstall.Result{Err: errors.New("brew failed")}, status: "brew failed"},
-		{name: "authentication", result: uninstall.Result{AuthFailed: true}, status: "Administrator authentication failed"},
-		{name: "authentication timeout", result: uninstall.Result{AuthTimedOut: true}, status: "Administrator authentication timed out"},
+		{name: "command", result: privileged.Result{Err: errors.New("brew failed")}, status: "brew failed"},
+		{name: "authentication", result: privileged.Result{AuthFailed: true}, status: "Administrator authentication failed"},
+		{name: "authentication timeout", result: privileged.Result{AuthTimedOut: true}, status: "Administrator authentication timed out"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -476,16 +478,16 @@ func TestUninstallSuccessWaitsForReloadAndKeepsTargetSnapshot(t *testing.T) {
 			homebrew.packages[brew.Cask] = []brew.Package{{Name: "Beta", Version: "2.1", Kind: brew.Cask}}
 			homebrew.err = tt.reloadErr
 
-			uninstaller.job.finish(uninstall.Result{})
-			_, reload := m.Update(jobResultMsg{id: m.operationID, result: uninstall.Result{}})
-			if m.mode != modeUninstall || !m.loading || m.loadPurpose != loadAfterUninstall {
+			uninstaller.job.finish(privileged.Result{})
+			_, reload := m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+			if m.mode != modeOperation || !m.loading || m.loadPurpose != loadAfterOperation {
 				t.Fatalf("success exposed before reload: mode=%v loading=%v purpose=%v", m.mode, m.loading, m.loadPurpose)
 			}
 			kind, theme, index, starts := m.kind, m.themeIndex, m.list.Index(), uninstaller.starts
-			for _, key := range []tea.KeyPressMsg{textKey("q"), textKey("tab"), textKey("u"), textKey("j"), textKey("t")} {
+			for _, key := range []tea.KeyPressMsg{textKey("q"), textKey("tab"), textKey("d"), textKey("j"), textKey("t")} {
 				m.Update(key)
 			}
-			if m.kind != kind || m.themeIndex != theme || m.list.Index() != index || uninstaller.starts != starts || m.mode != modeUninstall {
+			if m.kind != kind || m.themeIndex != theme || m.list.Index() != index || uninstaller.starts != starts || m.mode != modeOperation {
 				t.Fatal("controls were active during post-uninstall reload")
 			}
 
@@ -682,7 +684,7 @@ func TestQuitWaitsForTypedStartFailure(t *testing.T) {
 	m, uninstaller := newTestModel(t)
 	uninstaller.startStarted = make(chan struct{})
 	uninstaller.err = errors.New("cancelled start")
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	_, command := m.Update(textKey("y"))
 	batch := command().(tea.BatchMsg)
 	results := make(chan tea.Msg, len(batch))
@@ -712,7 +714,7 @@ func TestQuitWaitsForTypedStartFailure(t *testing.T) {
 func TestQuitWaitsForRacedStartAndTypedJobResult(t *testing.T) {
 	m, uninstaller := newTestModel(t)
 	uninstaller.startStarted = make(chan struct{})
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	_, command := m.Update(textKey("y"))
 	batch := command().(tea.BatchMsg)
 	results := make(chan tea.Msg, len(batch))
@@ -768,7 +770,7 @@ func TestFatalCleanupAndSignalsSetSupervisedExitCodes(t *testing.T) {
 	t.Run("fatal cleanup renders exact status", func(t *testing.T) {
 		m, uninstaller := newTestModel(t)
 		startFakeUninstall(t, m, uninstaller)
-		result := uninstall.Result{CleanupErr: errors.New("fatal uninstall cleanup failure:\nworkers remain")}
+		result := privileged.Result{CleanupErr: errors.New("fatal uninstall cleanup failure:\nworkers remain")}
 		uninstaller.job.finish(result)
 		_, quit := m.Update(jobResultMsg{id: m.operationID, result: result})
 		if m.mode != modeQuitting {
@@ -786,7 +788,7 @@ func TestFatalCleanupAndSignalsSetSupervisedExitCodes(t *testing.T) {
 	t.Run("fatal cleanup while quitting", func(t *testing.T) {
 		m, uninstaller := newTestModel(t)
 		startFakeUninstall(t, m, uninstaller)
-		result := uninstall.Result{CleanupErr: errors.New("fatal uninstall cleanup failure: workers remain")}
+		result := privileged.Result{CleanupErr: errors.New("fatal uninstall cleanup failure: workers remain")}
 		// Programmed before the signal. Quitting cancels the job, and the waiter
 		// goroutine records whatever the job terminated with; if that were a bare
 		// Cancelled result it would take the once-only recording slot and the fatal
@@ -839,15 +841,15 @@ func newSupervisorJob() *supervisorJob {
 	return &supervisorJob{cancelled: make(chan struct{})}
 }
 
-func (*supervisorJob) Events() <-chan uninstall.Event { return nil }
-func (*supervisorJob) RespondPassword(uninstall.RequestID, []byte) error {
+func (*supervisorJob) Events() <-chan privileged.Event { return nil }
+func (*supervisorJob) RespondPassword(privileged.RequestID, []byte) error {
 	return nil
 }
-func (*supervisorJob) CancelPassword(uninstall.RequestID) error { return nil }
+func (*supervisorJob) CancelPassword(privileged.RequestID) error { return nil }
 func (j *supervisorJob) Cancel() {
 	j.once.Do(func() { close(j.cancelled) })
 }
-func (*supervisorJob) Wait() uninstall.Result { return uninstall.Result{} }
+func (*supervisorJob) Wait() privileged.Result { return privileged.Result{} }
 
 func TestSupervisorCancelsEverythingBeforeConcurrentWaitAndAwaitsRacedJob(t *testing.T) {
 	infoStarted, infoCancelled := make(chan struct{}), make(chan struct{})
@@ -1160,7 +1162,7 @@ func TestDependencyToggleServesRetentionAndStartsNoCommand(t *testing.T) {
 	listCalls := homebrew.listCalls[brew.Formula]
 
 	m.list.Select(1)
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 	// Revealing rows resets the selection, so info retargets the new row 0.
 	if got := m.selectedPackage(); got == nil || got.Name != "awscli" {
 		t.Fatalf("selection after d=%#v, want the reset row 0", got)
@@ -1172,7 +1174,7 @@ func TestDependencyToggleServesRetentionAndStartsNoCommand(t *testing.T) {
 		t.Fatalf("status=%q priority=%v, want an ordinary Dependencies: shown", m.status, m.priority)
 	}
 
-	m.updateNormal(textKey("D"))
+	m.updateNormal(textKey("A"))
 	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "vault"}) {
 		t.Fatalf("rows after D=%q, want dependencies hidden again", got)
 	}
@@ -1194,10 +1196,10 @@ func TestTogglingNeverMutatesTheRetainedList(t *testing.T) {
 	drainList(t, m, m.switchKind())
 	before := append([]brew.Package(nil), m.listCache[brew.Formula]...)
 
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 	m.updateNormal(textKey("o"))
 	m.updateNormal(textKey("o"))
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 
 	if !slices.Equal(m.listCache[brew.Formula], before) {
 		t.Fatalf("retention mutated to %#v, want %#v", m.listCache[brew.Formula], before)
@@ -1212,7 +1214,7 @@ func TestDependencyToggleOnTheCaskListOnlyReportsStatus(t *testing.T) {
 	m.list.Select(1)
 	before := visibleNames(m)
 
-	if command := m.updateNormal(textKey("d")); command != nil {
+	if command := m.updateNormal(textKey("a")); command != nil {
 		t.Fatal("d re-targeted info on the cask list")
 	}
 	if got := visibleNames(m); !slices.Equal(got, before) {
@@ -1233,7 +1235,7 @@ func TestDependencyToggleOnTheCaskListOnlyReportsStatus(t *testing.T) {
 func TestSizeSortOrdersLargestFirstAndBackToSourceOrder(t *testing.T) {
 	m, _ := newFleetModel(t)
 	drainList(t, m, m.switchKind())
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 
 	m.updateNormal(textKey("o"))
 	if m.status != "Sort: size" || m.priority {
@@ -1255,7 +1257,7 @@ func TestSizeSortOrdersLargestFirstAndBackToSourceOrder(t *testing.T) {
 func TestQueryFilterPreservesTheSizeOrder(t *testing.T) {
 	m, _ := newFleetModel(t)
 	drainList(t, m, m.switchKind())
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 	m.updateNormal(textKey("o"))
 
 	// "c" matches awscli and gcc only; every formula's filter value contains the
@@ -1271,7 +1273,7 @@ func TestQueryFilterPreservesTheSizeOrder(t *testing.T) {
 func TestSizeSortAppliesWhenTheMeasurementLandsLate(t *testing.T) {
 	m, _ := newFleetModel(t)
 	drainList(t, m, m.switchKind())
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 	m.sizes = nil
 
 	m.updateNormal(textKey("o"))
@@ -1294,7 +1296,7 @@ func TestInstalledCountFollowsTheDependencyToggle(t *testing.T) {
 	if got := m.installedStatus(); got != "2 formulae installed" {
 		t.Fatalf("count with dependencies hidden=%q", got)
 	}
-	m.updateNormal(textKey("d"))
+	m.updateNormal(textKey("a"))
 	if got := m.installedStatus(); got != "4 formulae installed" {
 		t.Fatalf("count with dependencies shown=%q", got)
 	}
@@ -1405,8 +1407,8 @@ func TestBothCacheInvalidationSitesDropSizesAndRemeasure(t *testing.T) {
 		homebrew := m.homebrew.(*fakeHomebrew)
 		calls := homebrew.sizesCalls
 		startFakeUninstall(t, m, uninstaller)
-		uninstaller.job.finish(uninstall.Result{})
-		_, reload := m.Update(jobResultMsg{id: m.operationID, result: uninstall.Result{}})
+		uninstaller.job.finish(privileged.Result{})
+		_, reload := m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
 		if m.sizes != nil {
 			t.Fatal("a committed uninstall kept a stale measurement")
 		}
@@ -1421,7 +1423,7 @@ func TestBothCacheInvalidationSitesDropSizesAndRemeasure(t *testing.T) {
 		calls := homebrew.sizesCalls
 		drainList(t, m, m.switchKind())
 		drainList(t, m, m.switchKind())
-		m.updateNormal(textKey("d"))
+		m.updateNormal(textKey("a"))
 		m.updateNormal(textKey("o"))
 		if m.sizes == nil {
 			t.Fatal("a kind switch or a toggle dropped the measurement")
@@ -1482,7 +1484,7 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 
 		t.Run("confirmation cancels on "+pressed, func(t *testing.T) {
 			m, _ := newFleetModel(t)
-			m.Update(textKey("u"))
+			m.Update(textKey("d"))
 			m.Update(textKey(pressed))
 			if m.mode != modeNormal || m.status != "Uninstall cancelled" {
 				t.Fatalf("mode=%v status=%q, want a cancelled confirmation", m.mode, m.status)
@@ -1582,7 +1584,7 @@ func TestASizeSortRequestSurvivesAConfirmationDialog(t *testing.T) {
 	}
 
 	// Open the confirmation, then let the measurement land underneath it.
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	if m.mode != modeConfirm {
 		t.Fatalf("mode=%v, want confirm", m.mode)
 	}
@@ -1618,5 +1620,94 @@ func TestAToggleWithNoRetainedListKeepsTheExistingStatus(t *testing.T) {
 	}
 	if !m.sortBySize {
 		t.Fatal("the preference should still be recorded for the next load")
+	}
+}
+
+// An upgrade of a package Homebrew does not report as outdated would be a no-op,
+// so it must not reach the privileged machinery at all: no confirmation, no
+// snapshot, no job. This is the guard that keeps a destructive-adjacent path
+// unreachable for an operation with nothing to do.
+func TestUpgradeStartsNothingForAPackageThatIsUpToDate(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	selected := m.selectedPackage()
+	if selected == nil || selected.Outdated {
+		t.Fatalf("fixture must start on a package that is not outdated: %#v", selected)
+	}
+
+	if cmd := m.updateNormal(textKey("u")); cmd != nil {
+		t.Fatal("upgrade returned a command for a package that is up to date")
+	}
+	if m.mode != modeNormal {
+		t.Fatalf("mode=%v, want normal", m.mode)
+	}
+	if m.confirmation != nil {
+		t.Fatalf("an immutable snapshot was taken: %#v", m.confirmation)
+	}
+	if uninstaller.starts != 0 {
+		t.Fatalf("starts=%d, want the privileged path never reached", uninstaller.starts)
+	}
+	if want := selected.Name + " is up to date"; m.status != want || m.priority {
+		t.Fatalf("status=%q priority=%v, want %q as an ordinary status", m.status, m.priority, want)
+	}
+}
+
+// The two verbs share one confirmation path, and the verb travels with the
+// snapshot so every string and the argv agree on which operation is running.
+func TestBothVerbsShareTheConfirmationPathAndCarryTheirOwnWords(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		key      string
+		outdated bool
+		op       brew.Operation
+		title    string
+		prompt   string
+		progress string
+	}{
+		{"uninstall", "d", false, brew.Uninstall, "Confirm uninstall", "Uninstall Alpha?", "Uninstalling Alpha..."},
+		{"upgrade", "u", true, brew.Upgrade, "Confirm upgrade", "Upgrade Alpha?", "Upgrading Alpha..."},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m, uninstaller := newTestModel(t)
+			if tt.outdated {
+				// Mark the selected row so the upgrade guard lets it through.
+				items := m.list.Items()
+				pkg := items[0].(packageItem).packageValue
+				pkg.Outdated = true
+				m.setPackages([]brew.Package{pkg}, 0)
+			}
+
+			if cmd := m.updateNormal(textKey(tt.key)); cmd != nil {
+				t.Fatalf("confirmation returned a command before y: %v", cmd)
+			}
+			if m.mode != modeConfirm || m.confirmation == nil {
+				t.Fatalf("no confirmation opened: mode=%v snapshot=%v", m.mode, m.confirmation)
+			}
+			if m.verb != tt.op {
+				t.Fatalf("verb=%v, want %v", m.verb, tt.op)
+			}
+			if m.status != tt.title {
+				t.Fatalf("status=%q, want %q", m.status, tt.title)
+			}
+			if got := ansiSequence.ReplaceAllString(m.confirmationModal(*m.confirmation), ""); !strings.Contains(got, tt.prompt) {
+				t.Fatalf("modal=%q, want it to contain %q", got, tt.prompt)
+			}
+
+			// Confirm, and check the verb reached both the status and the runner.
+			_, cmd := m.Update(textKey("y"))
+			for _, message := range immediateMessages(cmd) {
+				if started, ok := message.(jobStartedMsg); ok {
+					m.Update(started)
+				}
+			}
+			if m.status != tt.progress {
+				t.Fatalf("progress status=%q, want %q", m.status, tt.progress)
+			}
+			if len(uninstaller.startedOps) != 1 || uninstaller.startedOps[0] != tt.op {
+				t.Fatalf("runner received %v, want exactly [%v]", uninstaller.startedOps, tt.op)
+			}
+			if got := ansiSequence.ReplaceAllString(m.footerLine(m.width-2), ""); !strings.Contains(got, words(tt.op).title+" in progress;") {
+				t.Fatalf("progress footer=%q, want the running verb named", got)
+			}
+		})
 	}
 }

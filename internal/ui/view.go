@@ -353,7 +353,7 @@ func (m *model) statusLine() string {
 		switch m.loadPurpose {
 		case loadRefresh:
 			status = "Refreshing " + kindPlural(m.kind) + "..."
-		case loadAfterUninstall:
+		case loadAfterOperation:
 			status = "Reloading " + kindPlural(m.kind) + "..."
 		default:
 			status = "Loading " + kindPlural(m.kind) + "..."
@@ -362,8 +362,8 @@ func (m *model) statusLine() string {
 	if m.mode == modeSearch && !m.loading {
 		return "Search: " + m.query + "_"
 	}
-	if m.mode == modeConfirm || m.mode == modePassword || m.mode == modeUninstall || m.mode == modeQuitting || m.loading || m.priority {
-		if m.spinnerActive && (m.loading || m.mode == modeUninstall || m.mode == modePassword) {
+	if m.mode == modeConfirm || m.mode == modePassword || m.mode == modeOperation || m.mode == modeQuitting || m.loading || m.priority {
+		if m.spinnerActive && (m.loading || m.mode == modeOperation || m.mode == modePassword) {
 			return m.spinner.View() + " " + status
 		}
 		return status
@@ -393,14 +393,14 @@ func (m *model) footerLine(width int) string {
 	switch {
 	case m.mode == modeQuitting:
 		keys = cleanupHelp
-	case m.loading && m.loadPurpose == loadAfterUninstall:
-		keys = progressHelp
+	case m.loading && m.loadPurpose == loadAfterOperation:
+		keys = progressHelp(m.verb)
 	case m.loading:
 		keys = loadingHelp
 	case m.mode == modeConfirm:
 		keys = confirmHelp
-	case m.mode == modeUninstall || m.mode == modePassword:
-		keys = progressHelp
+	case m.mode == modeOperation || m.mode == modePassword:
+		keys = progressHelp(m.verb)
 	}
 	// Two-tone, and every segment carries the full footer role rather than relying
 	// on an enclosing style. A single outer Render over pre-styled segments would
@@ -450,10 +450,21 @@ func (m *model) modalStyle() lipgloss.Style {
 	return borderStyle(m.currentTheme().border).Padding(0, 1)
 }
 
+func otherOperation(op brew.Operation) brew.Operation {
+	if op == brew.Upgrade {
+		return brew.Uninstall
+	}
+	return brew.Upgrade
+}
+
 func (m *model) confirmationModal(pkg brew.Package) string {
+	return m.confirmationModalFor(m.verb, pkg)
+}
+
+func (m *model) confirmationModalFor(op brew.Operation, pkg brew.Package) string {
 	lines := []string{
-		roleStyle(m.currentTheme().header).Render("Confirm uninstall"),
-		"Uninstall " + pkg.Name + "?",
+		roleStyle(m.currentTheme().header).Render(confirmTitle(op)),
+		words(op).title + " " + pkg.Name + "?",
 		roleStyle(m.currentTheme().footer).Render("y: confirm  other: cancel"),
 	}
 	return m.modalStyle().Render(strings.Join(lines, "\n"))
@@ -485,7 +496,12 @@ func (m *model) confirmationFits(pkg brew.Package) bool {
 	if m.width < minimumWidth || m.height < minimumHeight {
 		return false
 	}
+	// Both modals: the fit check runs before the verb is chosen in the widest
+	// sense, and the wider of the two is what must fit.
 	confirmation := m.confirmationModal(pkg)
+	if other := m.confirmationModalFor(otherOperation(m.verb), pkg); lipgloss.Width(other) > lipgloss.Width(confirmation) {
+		confirmation = other
+	}
 	passwordWidth := max(1, min(40, m.width-16))
 	passwordLines := func(body string) string {
 		return m.modalStyle().Render(strings.Join([]string{
@@ -504,7 +520,15 @@ func (m *model) confirmationFits(pkg brew.Package) bool {
 	}
 	available := m.width - 2
 	lines := []string{
-		"Uninstalling " + pkg.Name + "...",
+		// Both verbs, every time. The confirmation is for one of them, but the
+		// password and progress dialogs must stay renderable for either, so the
+		// narrowest terminal that passes here clears the longest string of both.
+		progressStatus(brew.Uninstall, pkg.Name),
+		progressStatus(brew.Upgrade, pkg.Name),
+		cancelledStatus(brew.Uninstall),
+		cancelledStatus(brew.Upgrade),
+		tooSmallStatus(brew.Uninstall),
+		tooSmallStatus(brew.Upgrade),
 		"Cancelling " + pkg.Name + "...",
 		"Loading casks...",
 		"Loading formulae...",

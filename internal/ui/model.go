@@ -21,7 +21,7 @@ import (
 
 	"lazybrew/internal/brew"
 	"lazybrew/internal/info"
-	"lazybrew/internal/uninstall"
+	"lazybrew/internal/privileged"
 )
 
 const (
@@ -35,7 +35,7 @@ const (
 	modeNormal mode = iota
 	modeSearch
 	modeConfirm
-	modeUninstall
+	modeOperation
 	modePassword
 	modeQuitting
 )
@@ -46,7 +46,7 @@ const (
 	loadStartup loadPurpose = iota
 	loadSwitch
 	loadRefresh
-	loadAfterUninstall
+	loadAfterOperation
 )
 
 type cancelReason uint8
@@ -89,7 +89,7 @@ type Supervisor struct {
 	sizesDone         <-chan struct{}
 	startCancel       context.CancelFunc
 	startDone         <-chan struct{}
-	job               uninstall.Job
+	job               privileged.Job
 	jobDone           <-chan struct{}
 	jobResultRecorded bool
 
@@ -157,7 +157,7 @@ func (s *Supervisor) clearStart(done <-chan struct{}) {
 	s.mu.Unlock()
 }
 
-func (s *Supervisor) setJob(job uninstall.Job, done <-chan struct{}) {
+func (s *Supervisor) setJob(job privileged.Job, done <-chan struct{}) {
 	s.mu.Lock()
 	s.job, s.jobDone = job, done
 	s.jobResultRecorded = false
@@ -168,7 +168,7 @@ func (s *Supervisor) setJob(job uninstall.Job, done <-chan struct{}) {
 	}
 }
 
-func (s *Supervisor) finishJob(result uninstall.Result) {
+func (s *Supervisor) finishJob(result privileged.Result) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.jobResultRecorded {
@@ -316,9 +316,9 @@ type sizesResultMsg struct {
 
 type jobStartedMsg struct {
 	id        uint64
-	job       uninstall.Job
-	events    <-chan uninstall.Event
-	result    <-chan uninstall.Result
+	job       privileged.Job
+	events    <-chan privileged.Event
+	result    <-chan privileged.Result
 	startDone <-chan struct{}
 }
 
@@ -330,20 +330,20 @@ type jobStartFailedMsg struct {
 
 type jobEventMsg struct {
 	id    uint64
-	event uninstall.Event
+	event privileged.Event
 	open  bool
 }
 
 type jobResultMsg struct {
 	id     uint64
-	result uninstall.Result
+	result privileged.Result
 }
 
 type model struct {
-	homebrew    brew.Homebrew
-	info        *info.Loader
-	uninstaller uninstall.Uninstaller
-	supervisor  *Supervisor
+	homebrew   brew.Homebrew
+	info       *info.Loader
+	runner     privileged.Runner
+	supervisor *Supervisor
 
 	mode          mode
 	kind          brew.Kind
@@ -374,18 +374,22 @@ type model struct {
 	showDeps     bool
 	sortBySize   bool
 
-	status           string
-	priority         bool
-	confirmation     *brew.Package
-	operation        *brew.Package
+	status       string
+	priority     bool
+	confirmation *brew.Package
+	operation    *brew.Package
+	// verb is captured with the confirmation snapshot and is as immutable as the
+	// snapshot: every user-facing string and the argv both derive from it, so a
+	// later selection change cannot retarget an in-flight operation's wording.
+	verb             brew.Operation
 	operationID      uint64
 	operationCancel  context.CancelFunc
 	startPending     bool
-	job              uninstall.Job
-	jobEvents        <-chan uninstall.Event
-	jobResult        <-chan uninstall.Result
+	job              privileged.Job
+	jobEvents        <-chan privileged.Event
+	jobResult        <-chan privileged.Result
 	jobPending       bool
-	passwordRequest  uninstall.RequestID
+	passwordRequest  privileged.RequestID
 	passwordAttempts int
 	cancelReason     cancelReason
 	spinnerActive    bool
@@ -393,7 +397,7 @@ type model struct {
 }
 
 // New constructs the complete UI and the supervisor retained by main.
-func New(homebrew brew.Homebrew, loader *info.Loader, uninstaller uninstall.Uninstaller) (tea.Model, *Supervisor) {
+func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner) (tea.Model, *Supervisor) {
 	items := list.New(nil, packageDelegate{}, 0, 0)
 	items.SetShowTitle(false)
 	items.SetShowFilter(false)
@@ -414,7 +418,7 @@ func New(homebrew brew.Homebrew, loader *info.Loader, uninstaller uninstall.Unin
 	m := &model{
 		homebrew:      homebrew,
 		info:          loader,
-		uninstaller:   uninstaller,
+		runner:        runner,
 		mode:          modeNormal,
 		kind:          brew.Cask,
 		list:          items,
@@ -514,7 +518,7 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.loading {
-		if m.loadPurpose != loadAfterUninstall && (key.String() == "q" || key.String() == "Q") {
+		if m.loadPurpose != loadAfterOperation && (key.String() == "q" || key.String() == "Q") {
 			return m, m.beginQuit(0)
 		}
 		return m, nil
@@ -527,11 +531,43 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.updateConfirmation(key)
 	case modePassword:
 		return m, m.updatePassword(key)
-	case modeUninstall:
+	case modeOperation:
 		return m, nil
 	default:
 		return m, m.updateNormal(key)
 	}
+}
+
+// operationWords carries the exact user-facing spellings for one operation.
+// Written out rather than derived from the verb: "upgrade" gerunds to "upgrading"
+// and "uninstall" to "uninstalling", so any suffix rule would be wrong for one of
+// them, and every one of these strings is pinned by SPEC.
+type operationWords struct {
+	lower  string
+	title  string
+	gerund string
+	past   string
+}
+
+func words(op brew.Operation) operationWords {
+	if op == brew.Upgrade {
+		return operationWords{lower: "upgrade", title: "Upgrade", gerund: "Upgrading", past: "Upgraded"}
+	}
+	return operationWords{lower: "uninstall", title: "Uninstall", gerund: "Uninstalling", past: "Uninstalled"}
+}
+
+func confirmTitle(op brew.Operation) string    { return "Confirm " + words(op).lower }
+func cancelledStatus(op brew.Operation) string { return words(op).title + " cancelled" }
+func tooSmallStatus(op brew.Operation) string {
+	return "Terminal too small; " + words(op).lower + " cancelled"
+}
+func startFailedStatus(op brew.Operation) string { return "Could not start " + words(op).lower }
+func progressStatus(op brew.Operation, name string) string {
+	return words(op).gerund + " " + name + "..."
+}
+func doneStatus(op brew.Operation, name string) string { return words(op).past + " " + name }
+func cleanupFailedStatus(op brew.Operation, err string) string {
+	return words(op).title + " cleanup failed: " + err
 }
 
 func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
@@ -552,23 +588,14 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		m.mode = modeSearch
 	case "tab":
 		return m.switchKind()
+	case "d", "D":
+		return m.confirmOperation(brew.Uninstall)
 	case "u", "U":
-		selected := m.selectedPackage()
-		if selected == nil {
-			return nil
-		}
-		if !m.confirmationFits(*selected) {
-			m.status, m.priority = "Widen terminal to confirm", true
-			return nil
-		}
-		snapshot := *selected
-		m.confirmation = &snapshot
-		m.mode = modeConfirm
-		m.status, m.priority = "Confirm uninstall", true
+		return m.confirmOperation(brew.Upgrade)
 	case "t", "T":
 		m.themeIndex = (m.themeIndex + 1) % len(themes)
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
-	case "d", "D":
+	case "a", "A":
 		m.showDeps = !m.showDeps
 		// Casks have no dependency relation, so only the status changes there. The
 		// flag still flips, so the key is never silently dead and a later `tab`
@@ -606,6 +633,34 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 // the same frame as the key press, starting no command at all. Map presence is
 // the hit test, not slice length, so a kind with nothing installed is a hit too
 // rather than re-shelling on every switch.
+// confirmOperation opens the confirmation for one privileged verb. Both verbs
+// share this path deliberately: the lowercase-y discipline, the immutable
+// snapshot, and the fit check are the security-relevant parts and must never be
+// re-derived per verb.
+func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
+	selected := m.selectedPackage()
+	if selected == nil {
+		return nil
+	}
+	// An upgrade of a package Homebrew does not report as outdated would be a
+	// no-op, so it starts nothing at all: no confirmation, no snapshot, no job.
+	// The freshness cell is the affordance that says which rows this key acts on.
+	if op == brew.Upgrade && !selected.Outdated {
+		m.status, m.priority = selected.Name+" is up to date", false
+		return nil
+	}
+	if !m.confirmationFits(*selected) {
+		m.status, m.priority = "Widen terminal to confirm", true
+		return nil
+	}
+	snapshot := *selected
+	m.confirmation = &snapshot
+	m.verb = op
+	m.mode = modeConfirm
+	m.status, m.priority = confirmTitle(op), true
+	return nil
+}
+
 func (m *model) switchKind() tea.Cmd {
 	m.kind = otherKind(m.kind)
 	m.status, m.priority = "", false
@@ -671,12 +726,12 @@ func (m *model) updateConfirmation(key tea.KeyPressMsg) tea.Cmd {
 	m.confirmation = nil
 	if key.Key().Text != "y" || snapshot == nil {
 		m.mode = modeNormal
-		m.status, m.priority = "Uninstall cancelled", true
+		m.status, m.priority = cancelledStatus(m.verb), true
 		return nil
 	}
 	if !m.confirmationFits(*snapshot) {
 		m.mode = modeNormal
-		m.status, m.priority = "Terminal too small; uninstall cancelled", true
+		m.status, m.priority = tooSmallStatus(m.verb), true
 		return nil
 	}
 	return m.startUninstall(*snapshot)
@@ -689,7 +744,7 @@ func (m *model) updatePassword(key tea.KeyPressMsg) tea.Cmd {
 		payload := []byte(value)
 		request := m.passwordRequest
 		m.wipePassword()
-		m.mode = modeUninstall
+		m.mode = modeOperation
 		err := m.job.RespondPassword(request, payload)
 		for i := range payload {
 			payload[i] = 0
@@ -705,7 +760,7 @@ func (m *model) updatePassword(key tea.KeyPressMsg) tea.Cmd {
 		m.job.CancelPassword(m.passwordRequest)
 		m.job.Cancel()
 		m.wipePassword()
-		m.mode = modeUninstall
+		m.mode = modeOperation
 		m.cancelReason = cancelUser
 		m.status, m.priority = "Cancelling "+m.operation.Name+"...", true
 		return nil
@@ -749,13 +804,13 @@ func (m *model) updatePassword(key tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *model) startUninstall(snapshot brew.Package) tea.Cmd {
-	m.mode = modeUninstall
+	m.mode = modeOperation
 	m.operation = &snapshot
 	m.operationID++
 	id := m.operationID
 	m.passwordAttempts = 0
 	m.cancelReason = cancelNone
-	m.status, m.priority = "Uninstalling "+snapshot.Name+"...", true
+	m.status, m.priority = progressStatus(m.verb, snapshot.Name), true
 	m.spinnerActive = true
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -764,12 +819,12 @@ func (m *model) startUninstall(snapshot brew.Package) tea.Cmd {
 	startDone := make(chan struct{})
 	m.supervisor.setStart(cancel, startDone)
 	return tea.Batch(func() tea.Msg {
-		job, err := m.uninstaller.Start(ctx, snapshot)
+		job, err := m.runner.Start(ctx, m.verb, snapshot)
 		if err != nil {
 			close(startDone)
 			return jobStartFailedMsg{id: id, err: err, startDone: startDone}
 		}
-		result := make(chan uninstall.Result, 1)
+		result := make(chan privileged.Result, 1)
 		waitDone := make(chan struct{})
 		m.supervisor.setJob(job, waitDone)
 		go func() {
@@ -818,24 +873,24 @@ func (m *model) handleJobStartFailed(msg jobStartFailedMsg) tea.Cmd {
 	m.operation, m.operationCancel = nil, nil
 	m.mode = modeNormal
 	if m.cancelReason == cancelTerminal {
-		m.status = "Terminal too small; uninstall cancelled"
+		m.status = tooSmallStatus(m.verb)
 	} else if msg.err != nil {
 		m.status = flattenStatus(msg.err.Error())
 	} else {
-		m.status = "Could not start uninstall"
+		m.status = startFailedStatus(m.verb)
 	}
 	m.priority = true
 	return nil
 }
 
-func waitJobEvent(id uint64, events <-chan uninstall.Event) tea.Cmd {
+func waitJobEvent(id uint64, events <-chan privileged.Event) tea.Cmd {
 	return func() tea.Msg {
 		event, open := <-events
 		return jobEventMsg{id: id, event: event, open: open}
 	}
 }
 
-func waitJobResult(id uint64, result <-chan uninstall.Result) tea.Cmd {
+func waitJobResult(id uint64, result <-chan privileged.Result) tea.Cmd {
 	return func() tea.Msg { return jobResultMsg{id: id, result: <-result} }
 }
 
@@ -849,10 +904,10 @@ func (m *model) handleJobEvent(msg jobEventMsg) tea.Cmd {
 	if !msg.open {
 		return nil
 	}
-	if msg.event.Type != uninstall.PasswordRequested || m.mode != modeUninstall || m.cancelReason != cancelNone {
+	if msg.event.Type != privileged.PasswordRequested || m.mode != modeOperation || m.cancelReason != cancelNone {
 		if m.mode == modePassword {
 			m.wipePassword()
-			m.mode = modeUninstall
+			m.mode = modeOperation
 			m.status, m.priority = "Administrator authentication failed", true
 			m.cancelReason = cancelAuthentication
 		}
@@ -887,36 +942,36 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 	result := msg.result
 	switch {
 	case result.CleanupErr != nil:
-		status := "Uninstall cleanup failed: " + flattenStatus(result.CleanupErr.Error())
+		status := cleanupFailedStatus(m.verb, flattenStatus(result.CleanupErr.Error()))
 		cmd := m.beginQuit(1)
 		m.status, m.priority = status, true
 		return cmd
 	case result.AuthTimedOut:
-		m.finishUninstall("Administrator authentication timed out")
+		m.finishOperation("Administrator authentication timed out")
 	case result.AuthFailed:
-		m.finishUninstall("Administrator authentication failed")
+		m.finishOperation("Administrator authentication failed")
 	case result.Cancelled:
 		switch m.cancelReason {
 		case cancelTerminal:
-			m.finishUninstall("Terminal too small; uninstall cancelled")
+			m.finishOperation(tooSmallStatus(m.verb))
 		case cancelAuthentication:
-			m.finishUninstall("Administrator authentication failed")
+			m.finishOperation("Administrator authentication failed")
 		default:
-			m.finishUninstall("Uninstall cancelled")
+			m.finishOperation(cancelledStatus(m.verb))
 		}
 	case result.Err != nil:
-		m.finishUninstall(flattenStatus(result.Err.Error()))
+		m.finishOperation(flattenStatus(result.Err.Error()))
 	default:
 		selection := m.list.Index()
 		sizesCmd := m.invalidateCaches()
-		m.mode = modeUninstall
+		m.mode = modeOperation
 		m.spinnerActive = true
-		return tea.Batch(m.startList(loadAfterUninstall, selection), sizesCmd, m.spinner.Tick)
+		return tea.Batch(m.startList(loadAfterOperation, selection), sizesCmd, m.spinner.Tick)
 	}
 	return nil
 }
 
-func (m *model) finishUninstall(status string) {
+func (m *model) finishOperation(status string) {
 	m.mode = modeNormal
 	m.status, m.priority = status, true
 	m.operation = nil
@@ -1067,7 +1122,7 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	// it changes nothing that matters - and skipping it there left the request
 	// dropped with no retry, so cancelling the dialog returned to a list in source
 	// order while the status still claimed a size sort.
-	if m.sortBySize && !m.loading && m.mode != modeUninstall {
+	if m.sortBySize && !m.loading && m.mode != modeOperation {
 		if cached, ok := m.listCache[m.kind]; ok {
 			m.setPackages(cached, 0)
 			return m.selectInfo()
@@ -1090,22 +1145,22 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 	if m.mode == modeQuitting {
 		return m.finishQuit()
 	}
-	if msg.purpose == loadAfterUninstall && m.cancelReason == cancelTerminal {
-		m.finishUninstall("Terminal too small; uninstall cancelled")
+	if msg.purpose == loadAfterOperation && m.cancelReason == cancelTerminal {
+		m.finishOperation(tooSmallStatus(m.verb))
 		return m.selectInfo()
 	}
 	if msg.err != nil {
 		m.setPackages(nil, 0)
 		m.info.Select(nil)
 		m.status, m.priority = flattenStatus(msg.err.Error()), false
-		if msg.purpose == loadAfterUninstall {
-			m.finishUninstall(m.status)
+		if msg.purpose == loadAfterOperation {
+			m.finishOperation(m.status)
 		}
 		return nil
 	}
 	m.listCache[msg.kind] = msg.packages
 	m.setPackages(msg.packages, m.loadSelection)
-	if msg.purpose == loadAfterUninstall {
+	if msg.purpose == loadAfterOperation {
 		name := ""
 		if m.operation != nil {
 			name = m.operation.Name
@@ -1113,7 +1168,7 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 		m.mode = modeNormal
 		m.operation = nil
 		m.cancelReason = cancelNone
-		m.status, m.priority = "Uninstalled "+name, true
+		m.status, m.priority = doneStatus(m.verb, name), true
 	} else {
 		m.mode = modeNormal
 		m.status, m.priority = "", false
@@ -1245,7 +1300,7 @@ func (m *model) resize(width, height int) tea.Cmd {
 	if m.confirmation != nil && !m.confirmationFits(*m.confirmation) {
 		m.confirmation = nil
 		m.mode = modeNormal
-		m.status, m.priority = "Terminal too small; uninstall cancelled", true
+		m.status, m.priority = tooSmallStatus(m.verb), true
 	}
 	if m.operation != nil && !m.confirmationFits(*m.operation) && m.cancelReason == cancelNone {
 		m.cancelReason = cancelTerminal
@@ -1259,11 +1314,11 @@ func (m *model) resize(width, height int) tea.Cmd {
 		if m.operationCancel != nil {
 			m.operationCancel()
 		}
-		if m.loading && m.loadPurpose == loadAfterUninstall && m.listCancel != nil {
+		if m.loading && m.loadPurpose == loadAfterOperation && m.listCancel != nil {
 			m.listCancel()
 		}
-		m.mode = modeUninstall
-		m.status, m.priority = "Terminal too small; uninstall cancelled", true
+		m.mode = modeOperation
+		m.status, m.priority = tooSmallStatus(m.verb), true
 	}
 	return nil
 }
@@ -1327,7 +1382,7 @@ func (m *model) wipePassword() {
 	m.password.Reset()
 	m.password.Blur()
 	m.password = blankPasswordInput()
-	m.passwordRequest = uninstall.RequestID{}
+	m.passwordRequest = privileged.RequestID{}
 }
 
 func otherKind(kind brew.Kind) brew.Kind {

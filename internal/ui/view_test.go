@@ -66,7 +66,7 @@ func TestResponsiveSplitAppearsAtSeventyTwoColumns(t *testing.T) {
 
 func TestConfirmationAndPasswordAreCenteredLayersOverBase(t *testing.T) {
 	m, _ := newTestModel(t)
-	m.Update(textKey("u"))
+	m.Update(textKey("d"))
 	confirmation := strings.Join(strippedLines(m), "\n")
 	for _, exact := range []string{"[ Apps ]    Formulae", "Confirm uninstall", "Uninstall Alpha?", "y: confirm  other: cancel"} {
 		if !strings.Contains(confirmation, exact) {
@@ -147,8 +147,8 @@ func TestModeSpecificStatusAndFooterStrings(t *testing.T) {
 		t.Fatalf("refresh footer=%q", lines[m.height-2])
 	}
 
-	m.loadPurpose = loadAfterUninstall
-	m.mode = modeUninstall
+	m.loadPurpose = loadAfterOperation
+	m.mode = modeOperation
 	lines = strippedLines(m)
 	if !strings.Contains(lines[m.height-3], "Reloading casks...") {
 		t.Fatalf("reload status=%q", lines[m.height-3])
@@ -422,7 +422,7 @@ func TestFooterListsEveryNormalKey(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "Search: / | Switch: tab | Uninstall: u | Deps: d | Sort: o | Theme: t | Refresh: r | Quit: q"
+	want := "Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q"
 	if footer != want {
 		t.Fatalf("footer=%q, want %q", footer, want)
 	}
