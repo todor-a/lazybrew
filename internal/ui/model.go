@@ -879,6 +879,20 @@ func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
 		m.mode = modeNormal
 		return nil
 	case "tab":
+		// Completion claims tab only while an incomplete is: token is under
+		// the cursor: there, a kind switch would be a mode exit the user
+		// visibly was not asking for mid-token. Every other query keeps tab's
+		// established switch-kind meaning, and the trailing space finishes
+		// the token so the next tab is a kind switch again. Rejoining on
+		// single spaces normalizes machine-written text, the same contract
+		// toggleQualifier documents.
+		if completed := completeQualifier(m.query); completed != "" {
+			fields := strings.Fields(m.query)
+			fields[len(fields)-1] = completed
+			m.query = strings.Join(fields, " ") + " "
+			m.applyQuery(0)
+			return m.selectInfo()
+		}
 		// The list result returns to normal mode anyway; leave search here so the
 		// mode change is visible before the load rather than after it.
 		m.mode = modeNormal

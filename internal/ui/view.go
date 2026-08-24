@@ -562,6 +562,12 @@ func (m *model) statusLine() string {
 		}
 	}
 	if m.mode == modeSearch && !m.loading {
+		// The hint is plain text: this string is styled wholesale by its
+		// caller, and an inner styled segment would cut the row's background -
+		// the same two-tone reset trap the footer documents.
+		if completed := completeQualifier(m.query); completed != "" {
+			return "Search: " + m.query + "_ · tab → " + completed
+		}
 		return "Search: " + m.query + "_"
 	}
 	if m.mode == modeConfirm || m.mode == modePassword || m.mode == modeOperation || m.mode == modeQuitting || m.loading || m.priority {

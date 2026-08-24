@@ -2206,3 +2206,55 @@ func TestSuppressedRowRefusesUpgradeWithTheReason(t *testing.T) {
 		t.Fatalf("status=%q, want the plain up-to-date guard for a row with no offer", m.status)
 	}
 }
+
+// Tab in search is modal: over an incomplete is: token it completes in place
+// and stays in search; over anything else it keeps its established
+// switch-kind meaning. The hint in the status row and the completion must
+// agree - both come from completeQualifier.
+func TestSearchTabCompletesAnIncompleteQualifier(t *testing.T) {
+	m, _ := newTestModel(t)
+	kind := m.kind
+	m.Update(textKey("/"))
+	m.Update(textKey("is:unt"))
+
+	if got := m.statusLine(); got != "Search: is:unt_ · tab → is:untrusted" {
+		t.Fatalf("status=%q, want the completion hint", got)
+	}
+
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.mode != modeSearch || m.kind != kind {
+		t.Fatalf("mode=%v kind=%v, want completion to stay in search on the same kind", m.mode, m.kind)
+	}
+	if m.query != "is:untrusted " {
+		t.Fatalf("query=%q, want the completed token plus the finishing space", m.query)
+	}
+	// The filter applied: no fixture cask is untrusted, so the list narrowed
+	// to nothing - and the finished token offers no further hint.
+	if names := visibleNames(m); len(names) != 0 {
+		t.Fatalf("visible=%v, want the completed filter applied", names)
+	}
+	if got := m.statusLine(); got != "Search: is:untrusted _" {
+		t.Fatalf("status=%q, want no hint on a finished token", got)
+	}
+
+	// With nothing to complete, tab means switch-kind again.
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.mode == modeSearch || m.kind == kind {
+		t.Fatalf("mode=%v kind=%v, want the second tab to switch kind and exit search", m.mode, m.kind)
+	}
+}
+
+// A query with no is: prefix never surrenders tab to completion.
+func TestSearchTabOnPlainTextStillSwitchesKind(t *testing.T) {
+	m, _ := newTestModel(t)
+	kind := m.kind
+	m.Update(textKey("/"))
+	m.Update(textKey("zed"))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.mode == modeSearch || m.kind == kind {
+		t.Fatalf("mode=%v kind=%v, want plain-text tab to keep switching kind", m.mode, m.kind)
+	}
+	if m.query != "zed" {
+		t.Fatalf("query=%q, want the query kept across the switch", m.query)
+	}
+}
