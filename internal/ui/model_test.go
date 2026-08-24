@@ -538,6 +538,27 @@ func TestOperationsQueueAndRunSerially(t *testing.T) {
 
 // A cancelled or failed job never lets queued work continue, and the status
 // names what was dropped rather than reading as work done.
+// A queue entry names what it will do, not only which package: an upgrade
+// carries brew's from → to, an uninstall only the name.
+func TestQueueEntriesCarryTheVersionTransition(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.verb = brew.Upgrade
+	m.operation = &brew.Package{Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask}
+	m.queue = []queuedOperation{
+		{verb: brew.Upgrade, pkg: brew.Package{Name: "Beta", Version: "2.0", LatestVersion: "2.1", Kind: brew.Cask}},
+		{verb: brew.Uninstall, pkg: brew.Package{Name: "Gamma", Version: "3.0", Kind: brew.Cask}},
+	}
+	pane := strings.Join(m.infoLines(46, 12), "\n")
+	for _, want := range []string{"Upgrading Alpha 1.0 → 2.0...", "queued · upgrade Beta 2.0 → 2.1", "queued · uninstall Gamma"} {
+		if !strings.Contains(pane, want) {
+			t.Fatalf("info pane %q missing %q", pane, want)
+		}
+	}
+	if strings.Contains(pane, "Gamma 3.0") {
+		t.Fatalf("info pane %q shows a version transition on an uninstall", pane)
+	}
+}
+
 // The queue block must survive an empty selection: mid-run, a search that
 // matches nothing clears the selection, and the pane's early blank-out used to
 // take the only view of the running and queued work with it.
