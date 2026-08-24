@@ -1303,8 +1303,7 @@ func TestQueryFilterPreservesTheSizeOrder(t *testing.T) {
 	m.updateNormal(textKey("a"))
 	m.updateNormal(textKey("o"))
 
-	// "c" matches awscli and gcc only; every formula's filter value contains the
-	// kind, so a letter of "formula" would match every row. Source order is
+	// "c" matches awscli and gcc only, by name. Source order is
 	// awscli then gcc, so the filtered result proves the size order survived.
 	m.query = "c"
 	m.applyFilter(0)
@@ -1380,7 +1379,7 @@ func TestListIsFullyNavigableBeforeSizesLand(t *testing.T) {
 	if m.list.Index() != 1 {
 		t.Fatalf("selection=%d, want j to move before sizes landed", m.list.Index())
 	}
-	if got := strippedLines(m)[3]; !strings.Contains(got, "Alpha") {
+	if got := strippedLines(m)[4]; !strings.Contains(got, "Alpha") {
 		t.Fatalf("row before sizes landed=%q, want it rendered", got)
 	}
 
@@ -1593,17 +1592,21 @@ func TestASupersededSizePassIsCancelled(t *testing.T) {
 	}
 }
 
-// A dependency row displays "dep" and no longer displays "formula". The search
-// field must agree with the word on the row.
-func TestSearchMatchesTheRenderedOriginToken(t *testing.T) {
+// The search field carries exactly the words on the row: the name, the
+// version, and "dep" for a dependency. The kind word is on no row — the tab
+// names it — so no row may be reachable through it.
+func TestSearchMatchesTheRenderedTokensOnly(t *testing.T) {
 	item := packageItem{packageValue: brew.Package{
 		Name: "llvm@22", Version: "22.1", Kind: brew.Formula, Dependency: true,
 	}}
 	value := strings.ToLower(item.FilterValue())
-	for _, want := range []string{"llvm@22", "dep", "formula"} {
+	for _, want := range []string{"llvm@22", "22.1", "dep"} {
 		if !strings.Contains(value, want) {
 			t.Fatalf("FilterValue()=%q, want it to contain %q", item.FilterValue(), want)
 		}
+	}
+	if strings.Contains(value, "formula") {
+		t.Fatalf("FilterValue()=%q, want no kind word", item.FilterValue())
 	}
 
 	onRequest := packageItem{packageValue: brew.Package{Name: "vault", Kind: brew.Formula}}

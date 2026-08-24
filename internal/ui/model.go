@@ -63,11 +63,11 @@ type packageItem struct{ packageValue brew.Package }
 
 func (i packageItem) FilterValue() string {
 	p := i.packageValue
-	// The rendered origin token, not only the kind. A dependency row displays
-	// "dep" and no longer displays "formula", so matching on kind alone would
-	// make the row unreachable by the word on it and reachable by a word that is
-	// not. Both are included: "formula" still finds every formula.
-	return p.Name + " " + p.Version + " " + string(p.Kind) + " " + strings.TrimSpace(originColumn(p))
+	// The rendered tokens only. The kind word is gone from the row — the active
+	// tab already names the kind — so it is gone from the filter too: a search
+	// must not match every row by a word that is on none of them, and "dep"
+	// stays because it is still the word on a dependency row.
+	return p.Name + " " + p.Version + " " + strings.TrimSpace(depColumn(p))
 }
 
 type packageDelegate struct{}
@@ -1382,7 +1382,9 @@ func (m *model) resize(width, height int) tea.Cmd {
 		paneWidth = max(0, splitColumn(width)-1)
 	}
 	selection := m.list.Index()
-	m.list.SetSize(paneWidth, m.contentRows)
+	// One row of the content area belongs to the table header, so the paginator
+	// pages by what is actually drawn below it.
+	m.list.SetSize(paneWidth, max(0, m.contentRows-1))
 	m.clampSelection(selection)
 	m.help.SetWidth(max(0, width-2))
 	m.viewport.SetWidth(max(0, width-splitColumn(width)-2))
