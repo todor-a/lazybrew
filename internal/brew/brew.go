@@ -42,6 +42,9 @@ type Package struct {
 	// request. Always false for a cask. Display data, not identity, exactly like
 	// Version: the (Kind, Name) info-cache key is unaffected.
 	Dependency bool
+	// Pinned is true when Homebrew excludes the formula from ordinary upgrades.
+	// Always false for a cask and display-only, like Dependency.
+	Pinned bool
 	// Untrusted is true when the package came from a third-party tap Homebrew's
 	// trust store does not cover, so brew itself refuses to load its definition
 	// (`brew info`, `brew upgrade`) until the user runs `brew trust`. Display
@@ -102,16 +105,16 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 		return parseList(string(stdout), kind), nil
 	}
 
-	// The enumeration and the dependency marker are independent reads of the same
+	// The enumeration and the two markers are independent reads of the same
 	// inventory, so they run concurrently. Sequentially they were about 0.64s each
 	// on the development machine, which doubled the formula load the list cache
 	// exists to avoid; concurrently the load is the slower of the two.
 	var (
-		wg                       sync.WaitGroup
-		stdout, dependencyStdout []byte
-		listErr, dependencyErr   error
+		wg                                     sync.WaitGroup
+		stdout, dependencyStdout, pinnedStdout []byte
+		listErr, dependencyErr, pinnedErr      error
 	)
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		stdout, _, listErr = run(ctx, args)
@@ -119,6 +122,12 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	go func() {
 		defer wg.Done()
 		dependencyStdout, _, dependencyErr = run(ctx, []string{"list", "--formula", "--no-installed-on-request"})
+	}()
+	go func() {
+		defer wg.Done()
+		// A failed annotation read absorbs into no marks: absence of evidence
+		// must not claim that a formula is unpinned.
+		pinnedStdout, _, pinnedErr = run(ctx, []string{"list", "--pinned"})
 	}()
 	wg.Wait()
 
@@ -133,6 +142,9 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	if dependencyErr != nil {
 		return nil, dependencyErr
 	}
+	if pinnedErr != nil {
+		pinnedStdout = nil
+	}
 	packages := parseList(string(stdout), kind)
 	dependencies := make(map[string]struct{})
 	for _, name := range parseNames(string(dependencyStdout)) {
@@ -141,6 +153,15 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	for i := range packages {
 		if _, ok := dependencies[packages[i].Name]; ok {
 			packages[i].Dependency = true
+		}
+	}
+	pinned := make(map[string]struct{})
+	for _, name := range parseNames(string(pinnedStdout)) {
+		pinned[name] = struct{}{}
+	}
+	for i := range packages {
+		if _, ok := pinned[packages[i].Name]; ok {
+			packages[i].Pinned = true
 		}
 	}
 	return packages, nil

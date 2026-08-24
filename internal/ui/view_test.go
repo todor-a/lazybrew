@@ -454,6 +454,14 @@ func TestOutdatedGlyphIsOneCell(t *testing.T) {
 	}
 }
 
+func TestPinnedFormulaClaimsTheFreshnessCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	row := ansiSequence.ReplaceAllString(m.packageLine(brew.Package{Name: "Alpha", Kind: brew.Formula, Outdated: true, Pinned: true}, true, 40), "")
+	if !strings.HasPrefix(row, " >P Alpha") {
+		t.Fatalf("pinned row=%q, want P to win over outdated", row)
+	}
+}
+
 // The search footer is the ambient discoverability surface for the filter
 // vocabulary; one row, per the issue-#31 plan.
 func TestSearchFooterTeachesTheFilterVocabulary(t *testing.T) {

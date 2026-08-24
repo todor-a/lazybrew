@@ -804,6 +804,10 @@ func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
 	if selected == nil {
 		return nil
 	}
+	if op == brew.Upgrade && selected.Pinned {
+		m.status, m.priority = selected.Name+" is pinned", false
+		return nil
+	}
 	// An upgrade of a package Homebrew does not report as outdated would be a
 	// no-op, so it starts nothing at all: no confirmation, no snapshot, no job.
 	// The freshness cell is the affordance that says which rows this key acts on.

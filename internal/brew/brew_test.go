@@ -82,11 +82,12 @@ func TestListCommandVectors(t *testing.T) {
 			want: [][]string{{"list", "--cask", "-1"}},
 		},
 		{
-			name: "formula enumerates every install and then marks dependencies",
+			name: "formula enumerates every install and marks dependencies and pins",
 			kind: Formula,
 			want: [][]string{
 				{"list", "--formula", "--versions"},
 				{"list", "--formula", "--no-installed-on-request"},
+				{"list", "--pinned"},
 			},
 		},
 	}
@@ -94,7 +95,7 @@ func TestListCommandVectors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := configureFakeBrew(t, "alpha 1.0\n", "", 0, false)
-			fakeBrewStdoutByArg(t, map[string]string{"--no-installed-on-request": ""})
+			fakeBrewStdoutByArg(t, map[string]string{"--no-installed-on-request": "", "--pinned": ""})
 			packages, err := New().List(context.Background(), tt.kind)
 			if err != nil {
 				t.Fatalf("List() error = %v", err)
@@ -176,18 +177,21 @@ func TestOutdatedRefusesAnInvalidKindWithoutStartingBrew(t *testing.T) {
 // out of 304 installed, so eight explicitly requested third-party-tap formulae
 // appear under neither filter. Enumerating the unfiltered list and using
 // `--no-installed-on-request` only as a marker is what keeps those eight visible.
-func TestFormulaListMarksOnlyTheReportedDependencySet(t *testing.T) {
+func TestFormulaListMarksOnlyTheReportedDependencyAndPinnedSets(t *testing.T) {
 	// The enumeration uses the default stdout; only the marker call is keyed, so
 	// the argument selecting it is unique to that invocation.
 	argsFile := configureFakeBrew(t, "onrequest\ndependency\ntapinstall\n", "", 0, false)
-	fakeBrewStdoutByArg(t, map[string]string{"--no-installed-on-request": "dependency\n"})
+	fakeBrewStdoutByArg(t, map[string]string{
+		"--no-installed-on-request": "dependency\n",
+		"--pinned":                  "onrequest\n",
+	})
 
 	packages, err := New().List(context.Background(), Formula)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
 	want := []Package{
-		{Name: "onrequest", Kind: Formula},
+		{Name: "onrequest", Kind: Formula, Pinned: true},
 		{Name: "dependency", Kind: Formula, Dependency: true},
 		{Name: "tapinstall", Kind: Formula},
 	}
@@ -197,6 +201,7 @@ func TestFormulaListMarksOnlyTheReportedDependencySet(t *testing.T) {
 	assertRecordedArgsAnyOrder(t, argsFile,
 		[]string{"list", "--formula", "--versions"},
 		[]string{"list", "--formula", "--no-installed-on-request"},
+		[]string{"list", "--pinned"},
 	)
 }
 
@@ -220,17 +225,29 @@ func TestFormulaListFailsWhenTheDependencyMarkerCallFails(t *testing.T) {
 	// one that failed.
 	assertRecordedArgsAnyOrder(t, argsFile,
 		[]string{"list", "--formula", "--versions"},
-		[]string{"list", "--formula", "--no-installed-on-request"})
+		[]string{"list", "--formula", "--no-installed-on-request"},
+		[]string{"list", "--pinned"})
 }
 
-func TestCaskListNeverReportsADependency(t *testing.T) {
+func TestFormulaListAbsorbsAPinnedMarkerFailure(t *testing.T) {
+	configureFakeBrew(t, "alpha\n", "", 0, false)
+	fakeBrewStdoutByArg(t, map[string]string{"--no-installed-on-request": ""})
+	fakeBrewFailByArg(t, "--pinned", "pinned unavailable")
+
+	packages, err := New().List(context.Background(), Formula)
+	if err != nil || len(packages) != 1 || packages[0].Pinned {
+		t.Fatalf("List() = %#v, %v; want one unmarked formula", packages, err)
+	}
+}
+
+func TestCaskListNeverReportsFormulaMarkers(t *testing.T) {
 	configureFakeBrew(t, "firefox\n", "", 0, false)
 	packages, err := New().List(context.Background(), Cask)
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if len(packages) != 1 || packages[0].Dependency {
-		t.Fatalf("List() = %#v, want one cask that is not a dependency", packages)
+	if len(packages) != 1 || packages[0].Dependency || packages[0].Pinned {
+		t.Fatalf("List() = %#v, want one unmarked cask", packages)
 	}
 }
 

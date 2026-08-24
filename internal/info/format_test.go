@@ -108,6 +108,14 @@ func TestFormatSaysOutdatedOnlyOnHomebrewsVerdict(t *testing.T) {
 	}
 }
 
+func TestFormatMarksAPinnedFormula(t *testing.T) {
+	pkg := brew.Package{Name: "ast-grep", Kind: brew.Formula, Pinned: true, Outdated: true, LatestVersion: "0.46.0"}
+	got := Format(pkg, formulaRaw, Dependents{})
+	if !strings.Contains(got, "Version    0.45.1  (pinned, outdated, latest 0.46.0)") {
+		t.Fatalf("pinned version missing from:\n%s", got)
+	}
+}
+
 func TestFormatFormulaKeepsDecisionFieldsAndDropsNoise(t *testing.T) {
 	// OutdatedKnown: Homebrew was asked and reported this package as current, which
 	// is what entitles the panel to say so.

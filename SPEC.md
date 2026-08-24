@@ -46,8 +46,9 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 | `kind` | Exactly `cask` or `formula`. No third value is valid. |
 | `outdated` **[REWRITE ADDITION]** | Whether `brew outdated` reports the package for its kind. False when that read failed or was never made. |
 | `dependency` **[REWRITE ADDITION]** | True when Homebrew reports the formula as not installed on request. Always false for a cask. Display data, not identity, exactly like `version`. |
+| `pinned` **[REWRITE ADDITION]** | True when `brew list --pinned` reports the formula. Always false for a cask and never part of identity or argv. |
 
-Package identity and the package-info cache key are `(kind, name)`. Version and `outdated` are display data, not identity.
+Package identity and the package-info cache key are `(kind, name)`. Version, `outdated`, `dependency`, and `pinned` are display data, not identity.
 
 **[REWRITE ADDITION]** `outdated` replaces nothing; it is a fourth field on a value that previously carried three. It is display data specifically: it stays out of the info cache key, out of the search filter target, and out of every argv, so adding it cannot change which panel is cached, which rows a query matches, or what any command runs. It is set from the section 5 outdated read at list time and is never derived from comparing two version strings.
 
@@ -161,6 +162,7 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | List | cask | `brew`, `list`, `--cask`, `-1` |
 | List | formula | `brew`, `list`, `--formula` |
 | Dependency set **[REWRITE ADDITION]** | formula | `brew`, `list`, `--formula`, `--no-installed-on-request` |
+| Pinned set **[REWRITE ADDITION]** | formula | `brew`, `list`, `--pinned` |
 | Package roots **[REWRITE ADDITION]** | — | `brew`, `--cellar` and `brew`, `--caskroom` |
 | Info | cask | `brew`, `info`, `--cask`, `<name>` |
 | Info | formula | `brew`, `info`, `--formula`, `<name>` |
@@ -201,7 +203,7 @@ The consequence is deliberate and is the same restraint applied elsewhere in thi
 
 **[REWRITE ADDITION]** The formula list vector replaces `brew`, `list`, `--formula`, `--installed-on-request`. That filter did not merely omit dependencies, it silently omitted formulae the user had explicitly requested. Measured: `--installed-on-request` reports 116 and `--no-installed-on-request` reports 180, against 304 installed — eight formulae appear under neither filter (`acli`, `codeburn`, `oh-my-posh`, `opencode`, `sshfs-mac`, `terraform`, `tidy-json`, `vault`), all third-party-tap installs whose `INSTALL_RECEIPT.json` records `"installed_on_request": true`, one of them 507 MB. Enumerating the unfiltered list and using `--no-installed-on-request` only as a marker surfaces those eight with the toggle off, at no extra cost, and keeps the row set reconcilable with the measured total. The eight-formula figure is machine- and version-specific and is recorded as evidence, not pinned as an invariant.
 
-**[REWRITE ADDITION]** The enumeration and the marker read run concurrently. They are independent reads of the same inventory, so a formula load costs the slower of the two rather than their sum. Measured warm on the development machine: `brew list --formula` about 0.04s and `brew list --formula --no-installed-on-request` about 0.46s, so about 0.46s rather than 0.50s; measured cold earlier the same reads were about 0.64s each, so about 0.64s rather than 1.27s. The saving is bounded by the slower read and grows with it, which matters because this is the load the list cache exists to avoid repeating.
+**[REWRITE ADDITION]** The enumeration and marker reads run concurrently. The dependency marker stays load-bearing; a failed pinned read absorbs into no pin marks.
 
 Their invocation order is therefore not a guarantee, and no test may assert one. The marker read stays load-bearing: its failure fails the whole load rather than degrading to an unmarked list, because an unmarked list would show every dependency as installed on request and the toggle that reveals them would silently show nothing. Where both fail, the enumeration's error is reported, being the more useful of the two.
 
@@ -283,7 +285,7 @@ The footer is two-tone: the action in the footer role, the keystroke bold, the s
 
 Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `Search: / | Switch: tab | Unin`: the clip falls inside `Uninstall:`. **[REWRITE ADDITION]** Rebinding uninstall to `d` and adding `Upgrade: u` and `All: a` left this prefix untouched, because `Uninstall:` stayed third; that is the constraint the ordering exists to satisfy. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
-Package rows render a selection marker, a freshness cell, name, kind, and optional version. **[REWRITE ADDITION]** The row shape is ` <marker><freshness> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row and `<freshness>` is one fixed cell holding `↑` for a package `brew outdated` reports and a space otherwise. This replaces the earlier ` <marker> <name-column> <kind>[ <version>]`, which had no cell for the outdated verdict. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
+Package rows render a selection marker, a freshness cell, name, kind, and optional version. **[REWRITE ADDITION]** The row shape is ` <marker><freshness> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row and `<freshness>` is one fixed cell holding `P` for a pinned formula, `↑` for another package `brew outdated` reports, and a space otherwise. This replaces the earlier ` <marker> <name-column> <kind>[ <version>]`, which had no cell for the outdated verdict. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
 
 **[REWRITE ADDITION]** The freshness cell sits immediately after the selection marker, so the narrow layout — where the list is the only pane and the marker matters most — cannot clip it away. It is taken from the name column, and only where the 30-cell cap is not already absorbing the slack: the name column arithmetic becomes `min(30, max(8, pane-width - 5 - len(kind)))`, one cell tighter than the previous `pane-width - 4 - len(kind)`. At 32 columns a cask row's name column goes from 22 to 21 cells and a formula row's from 19 to 18; at 72 columns from 27 to 26; at 80 columns and wider it stays 30, because the cap already discarded that cell. No pane, divider, border, or total row width changes.
 
@@ -337,7 +339,7 @@ Rows appear only when their value is available, in this order:
 
 | Row | Value |
 |---|---|
-| `Version` **[REWRITE ADDITION]** | Installed version, then exactly one of: `(outdated, latest <version>)` when `brew outdated` reports the package and a distinct newer version parses; `(outdated)` when it reports the package and no distinct newer version parses; `(latest <version>)` when it does not report the package but the parsed versions differ; `(up to date)` otherwise. |
+| `Version` **[REWRITE ADDITION]** | Installed version followed by applicable state: `pinned`, `outdated`, and `latest <version>` in that order; `(up to date)` only when no other state applies and the outdated verdict is known. |
 | `Size` | Installed size, then file count when Homebrew reports one. |
 | `Installed` | `as a dependency`, and only then. |
 | `License` | Homebrew's license field. Formulae only; casks do not carry one. |
@@ -643,6 +645,8 @@ The fit check measures the longest string of **both** verb sets and both confirm
 Uninstall moved from `u` to `d`; `u` starts an upgrade; the dependency toggle moved from `d` to `a`. That is the first deviation: this section originally specified `g` for upgrade. The footer became `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q`, and the section 6 exact 30-cell prefix at width 32 is unchanged, because `Uninstall:` stayed third.
 
 `u` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the ordinary status `<name> is up to date`. The privileged machinery stays unreachable for an operation that would be a no-op, and the section 6 freshness cell is exactly the affordance that tells the user which rows `u` acts on.
+
+`u` on a pinned formula likewise starts nothing and sets `<name> is pinned`, even when `brew outdated` reports a newer version.
 
 `u` now performs a different mutation than it did before this change, where it uninstalled. No migration notice is shown. The guard is the confirmation itself, which names both the verb and the package and accepts lowercase `y` only, and whose wording differs between the two verbs in the title and the prompt.
 
