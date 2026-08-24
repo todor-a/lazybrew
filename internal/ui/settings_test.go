@@ -67,3 +67,42 @@ func TestThemeChoicePersistsAcrossRuns(t *testing.T) {
 		t.Fatalf("disabled persistence restored index %d, want 0", got)
 	}
 }
+
+// The published schema must accept exactly the thresholds this binary ships,
+// pinned the same way the theme enum is.
+func TestPublishedSchemaMatchesThresholdNames(t *testing.T) {
+	raw, err := os.ReadFile("../../settings.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema struct {
+		Properties struct {
+			OutdatedThreshold struct {
+				Enum []string `json:"enum"`
+			} `json:"outdatedThreshold"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(schema.Properties.OutdatedThreshold.Enum, thresholdNames) {
+		t.Fatalf("schema enum %v, thresholds %v", schema.Properties.OutdatedThreshold.Enum, thresholdNames)
+	}
+}
+
+// An unknown or empty threshold degrades to "any" — the direction that hides
+// nothing — and startup canonicalizes the file, exactly like the theme.
+func TestOutdatedThresholdCanonicalizes(t *testing.T) {
+	path := settingsFile(t.TempDir())
+	saveSettings(path, settings{OutdatedThreshold: "hourly"})
+	if got := ensureSettings(path); got.OutdatedThreshold != "any" {
+		t.Fatalf("unknown threshold canonicalized to %q, want any", got.OutdatedThreshold)
+	}
+	if got := loadSettings(path); got.OutdatedThreshold != "any" {
+		t.Fatalf("rewritten file holds %q, want any", got.OutdatedThreshold)
+	}
+	saveSettings(path, settings{OutdatedThreshold: "minor"})
+	if got := ensureSettings(path); got.OutdatedThreshold != "minor" {
+		t.Fatalf("valid threshold rewritten to %q, want minor", got.OutdatedThreshold)
+	}
+}

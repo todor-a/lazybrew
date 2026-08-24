@@ -11,6 +11,11 @@
       "type": "string",
       "enum": ["Lazygit", "Bright", "Ocean", "Dracula"],
       "description": "Color theme. Cycle in-app with t."
+    },
+    "outdatedThreshold": {
+      "type": "string",
+      "enum": ["any", "minor", "major"],
+      "description": "How big a version jump must be before a package is marked outdated. Unreadable versions are always marked."
     }
   }
 }
