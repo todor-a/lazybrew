@@ -14,6 +14,10 @@ var (
 		key.NewBinding(key.WithKeys("u", "U"), key.WithHelp("u", "uninstall")),
 		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("t", "theme")),
 		key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("r", "refresh")),
+		// Inserted after `r refresh` specifically so the 32-column footer prefix
+		// stays exactly `[/ or s] search  tab switch  u`, which section 6 pins.
+		key.NewBinding(key.WithKeys("d", "D"), key.WithHelp("d", "deps")),
+		key.NewBinding(key.WithKeys("o", "O"), key.WithHelp("o", "sort")),
 		key.NewBinding(key.WithKeys("q", "Q"), key.WithHelp("q", "quit")),
 	}
 	confirmHelp = footerKeys{

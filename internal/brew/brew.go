@@ -31,6 +31,10 @@ type Package struct {
 	// evidence at all. Display state only: it is outside the cache key, the
 	// filter value, and every argv, exactly as Outdated is.
 	OutdatedKnown bool
+	// Dependency is true when Homebrew reports the formula as not installed on
+	// request. Always false for a cask. Display data, not identity, exactly like
+	// Version: the (Kind, Name) info-cache key is unaffected.
+	Dependency bool
 }
 
 // Homebrew exposes the read-only operations used by the application.
@@ -39,6 +43,7 @@ type Homebrew interface {
 	Outdated(context.Context, Kind) ([]string, error)
 	Info(context.Context, Package) (string, error)
 	Uses(context.Context, Package) ([]string, error)
+	Sizes(context.Context) (Sizes, error)
 }
 
 type client struct{}
@@ -55,6 +60,21 @@ func New() Homebrew {
 	return client{}
 }
 
+// List enumerates one kind's installed packages.
+//
+// The formula inventory is the unfiltered `brew list --formula`, and a second
+// call marks which of those rows Homebrew installed as a dependency rather than
+// on request. Filtering the inventory with `--installed-on-request` instead —
+// which is what parity did — hid two different things: every dependency, and
+// also formulae the user did explicitly request whose receipt Homebrew does not
+// report under either filter (third-party taps on the measured machine: 116 on
+// request plus 180 not-on-request is 296 of 304). Enumerating everything and
+// using the filter only as a marker surfaces both, and keeps the row count
+// reconcilable with the measured size total.
+//
+// A failed marker call fails the whole load rather than degrading: 304 rows all
+// labelled on-request would be a lie about removal safety on a screen that feeds
+// a destructive action.
 func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	args, err := listArgs(kind)
 	if err != nil {
@@ -65,7 +85,25 @@ func (client) List(ctx context.Context, kind Kind) ([]Package, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseList(string(stdout), kind), nil
+	packages := parseList(string(stdout), kind)
+	if kind != Formula {
+		return packages, nil
+	}
+
+	dependencyStdout, _, err := run(ctx, []string{"list", "--formula", "--no-installed-on-request"})
+	if err != nil {
+		return nil, err
+	}
+	dependencies := make(map[string]struct{})
+	for _, name := range parseNames(string(dependencyStdout)) {
+		dependencies[name] = struct{}{}
+	}
+	for i := range packages {
+		if _, ok := dependencies[packages[i].Name]; ok {
+			packages[i].Dependency = true
+		}
+	}
+	return packages, nil
 }
 
 // Outdated reports the names of kind that `brew upgrade` would act on.
@@ -143,7 +181,7 @@ func listArgs(kind Kind) ([]string, error) {
 	case Cask:
 		return []string{"list", "--cask", "-1"}, nil
 	case Formula:
-		return []string{"list", "--formula", "--installed-on-request"}, nil
+		return []string{"list", "--formula"}, nil
 	default:
 		return nil, errInvalidKind
 	}

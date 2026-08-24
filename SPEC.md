@@ -23,6 +23,10 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 - Supporting Linux, Windows, package managers other than Homebrew, or remote Homebrew installations.
 - Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package. **[REWRITE ADDITION]** Reporting which packages `brew outdated` names is a read and is not covered by this non-goal; the app surfaces the fact and takes no action on it. Section 9A designs an upgrade action but does not implement one, and this non-goal is amended only by the increment that implements it.
 - Listing formulae installed only as dependencies.
+- Installing, upgrading, pinning, or otherwise mutating packages except uninstalling the explicitly confirmed package.
+- **[REWRITE ADDITION]** Installing, upgrading, or pinning dependency-only formulae. Replaces the non-goal `Listing formulae installed only as dependencies.`, which forbade the only view that can answer what is consuming disk: on the measured machine the dependency-only set is 180 of 304 installed formulae and holds 7 of the 12 largest packages, including the single largest at 1.5 GB. Dependency-only formulae are now listed behind an explicit toggle that is off at startup (section 4), so the curated default view is unchanged.
+
+  This expands the destructive surface and the non-goal must not be read as shielding those rows. With the toggle on, a revealed dependency row is an ordinary `u` target like any other: nothing in this application refuses it. The only guards are Homebrew's own refusal to remove a formula another formula needs, and the info pane's `Removing this breaks <n> installed formula(e).` verdict, which is advisory and is withheld entirely when the dependents lookup fails.
 - Pre-authenticating with `sudo -v` or prompting for a password before Homebrew asks for one.
 - Caching or reusing administrator passwords.
 - Parsing a pseudo-terminal, scraping a sudo prompt, using `sudo -S`, or suspending the TUI for terminal authentication.
@@ -42,10 +46,13 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 | `version` | The complete remainder of that trimmed line after the first token; it may be empty. |
 | `kind` | Exactly `cask` or `formula`. No third value is valid. |
 | `outdated` **[REWRITE ADDITION]** | Whether `brew outdated` reports the package for its kind. False when that read failed or was never made. |
+| `dependency` **[REWRITE ADDITION]** | True when Homebrew reports the formula as not installed on request. Always false for a cask. Display data, not identity, exactly like `version`. |
 
 Package identity and the package-info cache key are `(kind, name)`. Version and `outdated` are display data, not identity.
 
 **[REWRITE ADDITION]** `outdated` replaces nothing; it is a fourth field on a value that previously carried three. It is display data specifically: it stays out of the info cache key, out of the search filter target, and out of every argv, so adding it cannot change which panel is cached, which rows a query matches, or what any command runs. It is set from the section 5 outdated read at list time and is never derived from comparing two version strings.
+
+**[REWRITE ADDITION]** `kind` keeping exactly two values is the reason dependency visibility is a mode on the formula list rather than a third list. A dependency-only formula *is* a formula everywhere it matters — `brew info --formula`, `brew uses --installed`, and `brew uninstall --formula` all behave identically for it, and only the inventory query differs — so a third `kind` would propagate into the list argv, the uninstall argv builder, the kind flag, the list cache, and the `(kind, name)` info key to express a distinction that is one boolean. The two 22-cell tab labels below also leave no room for a third label at the supported 32-column width.
 
 **[REWRITE ADDITION]** Before `brew info` or `brew uninstall`, reject an inventory value whose name is empty, begins with `-`, or contains NUL or a Unicode control character. An info rejection uses the cache/info-pane text `Unsafe package name; info refused`; an uninstall rejection reports `Unsafe package name; uninstall refused`. Either rejection starts no process. This guard keeps the parity argv forms below from interpreting an inventory value as an option.
 
@@ -72,6 +79,8 @@ Parity stored the total in the status slot on list success, so it went stale two
 
 A priority status still owns the whole row per composition rows 1 through 3, so a post-uninstall `Uninstalled <name>` shows no count until priority clears. That is unchanged and intentional.
 
+**[REWRITE ADDITION]** Because the count follows the live list, it also follows the section 4 dependency toggle with no additional code: on the measured machine the formula list reports `124 formulae installed` with dependencies hidden and `304 formulae installed` with them shown.
+
 **[REWRITE ADDITION]** The Homebrew plural is spelled `formulae` in every status string. Parity's `formulas` is replaced so the header, status, and row `kind` column no longer disagree.
 
 ## 4. Current feature set and exact keys
@@ -89,17 +98,21 @@ Key handling is mode-first. A modal mode receives ordinary keys before the under
 | `u`, `U` | Open confirmation for the selected package if one exists and the safety-fit check passes. With no selected package, do nothing. | **[CURRENT/PARITY]** plus centered dialog **[REWRITE ADDITION]** |
 | `t`, `T` | Cycle to the next theme and set status to `Theme: <name>`. | **[CURRENT/PARITY]** |
 | `r`, `R` | Perform the refresh contract in section 8. | **[CURRENT/PARITY]** |
+| `d`, `D` | Toggle dependency-only formulae into and out of the formula list, resetting selection to the first row, and set status to `Dependencies: shown` / `Dependencies: hidden`. Served from the section 8 list cache: it starts no command and enters no loading state. On the cask list only the status changes and selection is preserved, because casks have no dependency relation — the flag still flips, so the key is never silently dead and a later `tab` lands in the requested state. | **[REWRITE ADDITION]** |
+| `o`, `O` | Toggle row order between source order and installed size, largest first, resetting selection to the first row, and set status to `Sort: size` / `Sort: name`. Also served from the list cache with no command. A no-op on order until the section 5 size pass lands, at which point the requested order is applied. | **[REWRITE ADDITION]** |
 | `q`, `Q` | Cleanly quit with status 0. | **[CURRENT/PARITY]** |
 
 No Bubbles default key that is absent from this table may remain enabled. In particular, paging, help expansion, fuzzy-search shortcuts, vim left/right paging, and default list quit bindings must not create additional behavior.
 
+**[REWRITE ADDITION]** `d` and `o` were chosen because they are the only unbound single letters left that carry no competing convention here: `S` is already a third search key in the row below, and the list has no delete action for `d` to collide with. Both are normal-mode only. Neither key changes what is installed, so neither invalidates any cache.
+
 ### Search-edit mode
 
-Search is case-insensitive substring matching against `name + " " + version + " " + kind`. It preserves source list order; it does not fuzzy-rank results. The Go comparison is the substring relation after applying `strings.ToLower` to both operands.
+Search is case-insensitive substring matching against `name + " " + version + " " + kind`. **[REWRITE ADDITION]** The rendered origin token is appended, so a row displaying `dep` is reachable by that word; `formula` continues to match every formula, including the dependency-only ones whose rows no longer spell it. It preserves source list order; it does not fuzzy-rank results. The Go comparison is the substring relation after applying `strings.ToLower` to both operands.
 
 | Keys | Result |
 |---|---|
-| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `r`, `s`, and `/` have no global meaning while editing. |
+| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `r`, `s`, `/`, and **[REWRITE ADDITION]** `d`, `D`, `o`, `O` have no global meaning while editing. |
 | `backspace`, `ctrl+h` | Remove the final query rune if one exists. Match a Bubble Tea v2 `KeyBackspace`/`backspace` event; also accept `ctrl+h` if an enhanced keyboard protocol delivers it distinctly. |
 | `enter` | Accept the query, leave it active, and return to normal mode. |
 | `tab` | **[REWRITE ADDITION]** Perform the normal-mode `tab` kind switch and return to normal mode. Parity ignored `tab` here, which made the advertised switch key silently dead while a query was being typed. Search mode is left before the load starts rather than when its result lands, so the mode change is visible immediately; the query is preserved and the target list arrives filtered. |
@@ -146,7 +159,9 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | Operation | Kind | argv |
 |---|---|---|
 | List | cask | `brew`, `list`, `--cask`, `-1` |
-| List | formula | `brew`, `list`, `--formula`, `--installed-on-request` |
+| List | formula | `brew`, `list`, `--formula` |
+| Dependency set **[REWRITE ADDITION]** | formula | `brew`, `list`, `--formula`, `--no-installed-on-request` |
+| Package roots **[REWRITE ADDITION]** | — | `brew`, `--cellar` and `brew`, `--caskroom` |
 | Info | cask | `brew`, `info`, `--cask`, `<name>` |
 | Info | formula | `brew`, `info`, `--formula`, `<name>` |
 | Uninstall | cask | `brew`, `uninstall`, `--cask`, `<confirmed-name>` |
@@ -176,6 +191,15 @@ The two kinds must never be collapsed into one `brew outdated --quiet` call. A f
 The detail panel does distinguish the two, because it has room to. `Version` renders `(up to date)` only where a verdict was actually obtained; where the read failed and Homebrew's own text shows no newer version, the parenthetical is dropped and the installed version stands alone. This is the section 6 restraint about withheld evidence applied to freshness: a newer version parsed from `brew info` is independent evidence and still renders as `(latest <version>)` without a verdict.
 
 The marker's meaning is delegated wholesale to Homebrew: "`brew outdated` reports this", which is also the precondition for upgrading it. This specification deliberately does not restate Homebrew's rule for which `auto_updates` casks land in the default set — `postman` does and `firefox` does not, and that rule could not be established from the receipts. The consequence is accepted: if Homebrew changes that default, the markers change with no code change here and no failing test.
+| Installed size **[REWRITE ADDITION]** | formula | `/usr/bin/du`, `-k`, `-d`, `1`, `<cellar>` |
+
+**[REWRITE ADDITION]** The Caskroom is not measured, and no size is offered for a cask - not in the row, not in the header total. A cask's Caskroom entry is frequently a symlink to a bundle in `/Applications`, which `du` reports as about 12 KB; where it is not a symlink it may be a leftover installer package, which reports the installer rather than the application. Measured on the development machine: 29 of 39 casks read under 1 MB, `alt-tab` read 12 KB against a real 12 MB bundle, `google-chrome` read 683 MB only because the Caskroom holds a duplicate bundle, and the largest cask row was a 1.1 GB leftover Excel installer against a 2.4 GB application. Those numbers are not sizes.
+
+The consequence is deliberate and is the same restraint applied elsewhere in this document: where a number cannot be established, none is shown. The size column is reserved on the formula list only, and the header total is the Cellar's and renders on the formula list only, because a Cellar figure above cask rows would name a fleet the screen is not showing. The Cellar is 9.2 GB of the 11.3 GB this feature exists to account for, so the question is still answered where it can be answered honestly.
+
+**[REWRITE ADDITION]** The formula list vector replaces `brew`, `list`, `--formula`, `--installed-on-request`. That filter did not merely omit dependencies, it silently omitted formulae the user had explicitly requested. Measured: `--installed-on-request` reports 116 and `--no-installed-on-request` reports 180, against 304 installed — eight formulae appear under neither filter (`acli`, `codeburn`, `oh-my-posh`, `opencode`, `sshfs-mac`, `terraform`, `tidy-json`, `vault`), all third-party-tap installs whose `INSTALL_RECEIPT.json` records `"installed_on_request": true`, one of them 507 MB. Enumerating the unfiltered list and using `--no-installed-on-request` only as a marker surfaces those eight with the toggle off, at no extra cost, and keeps the row set reconcilable with the measured total. The eight-formula figure is machine- and version-specific and is recorded as evidence, not pinned as an invariant.
+
+The marker call is load-bearing for every formula list load and its failure fails the whole load rather than degrading. Rendering 304 rows all labelled on-request would misreport removal safety on a screen that feeds a destructive action. Use `--no-installed-on-request`, not `--installed-as-dependency`: Homebrew prints `Warning: Calling the --installed-as-dependency switch is deprecated! Use --no-installed-on-request instead.`
 
 **[REWRITE ADDITION]** There is no cask form of the dependents vector, and one must not be added. `brew uses` resolves its argument as a formula, so a cask token makes it warn about an unknown formula and report nothing; a cask must never be allowed to read as "nothing depends on this". `Uses` rejects a non-formula kind before starting any process, and applies the same package-name validator as `Info`, reporting `Unsafe package name; dependents refused`. Its output is one installed formula name per nonblank line.
 
@@ -236,14 +260,14 @@ Do not use Huh or another modal package. `View` is pure: it renders state and mu
 **[CURRENT/PARITY]** At 32×9 or larger, the screen contains:
 
 1. A full outer border.
-2. Header row: the section 3 list tab bar, alone. **[REWRITE ADDITION]** Parity rendered `lazybrew [<theme>]  <active-list>  Tab: switch`; all three parts around the tab bar are removed. The app name is redundant on a screen the user just launched. The theme name is permanent chrome for a value that only matters while cycling it, and `t` already reports `Theme: <name>` in the status row on demand. The `Tab: switch` hint named no destination; the tab bar itself does, and `tab switch` is now carried in the normal footer.
+2. Header row: the section 3 list tab bar, alone. **[REWRITE ADDITION]** Parity rendered `lazybrew [<theme>]  <active-list>  Tab: switch`; all three parts around the tab bar are removed. The app name is redundant on a screen the user just launched. The theme name is permanent chrome for a value that only matters while cycling it, and `t` already reports `Theme: <name>` in the status row on demand. The `Tab: switch` hint named no destination; the tab bar itself does, and `tab switch` is now carried in the normal footer. **[REWRITE ADDITION]** The header additionally carries the section 5 fleet total, right aligned against the interior edge, once the measurement has landed. It is held to the same standard that removed the app name and the theme name: unlike those, the total is the question this screen exists to answer and is always relevant, and the status row is already contested by query, count, and errors and is the first thing clipped at 32 columns. The value is bare, with no label, because 22 cells of tab bar plus one gap plus at most 6 cells of value fits the 30-cell minimum interior and a labelled form does not. It reports the whole fleet, not the visible subset, so it does not flicker as the query or the dependency toggle changes. It is omitted rather than clipped whenever the interior cannot hold `label + 1 + value`, so the pinned tab-bar cell slots are never disturbed.
 3. A horizontal rule.
 4. A package content region of exactly `height - 7` rows.
 5. A horizontal rule.
 6. One status row.
 7. One footer/help row.
 
-The normal footer's exact logical string is `[/ or s] search  tab switch  u uninstall  t theme  r refresh  q quit`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. **[REWRITE ADDITION]** `tab switch` sits second, next to the other list-navigation key; parity omitted `tab` from the footer entirely and taught it only in the header.
+The normal footer's exact logical string is `[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. **[REWRITE ADDITION]** `tab switch` sits second, next to the other list-navigation key; parity omitted `tab` from the footer entirely and taught it only in the header. **[REWRITE ADDITION]** `d deps` and `o sort` are inserted after `r refresh` specifically so the 30-cell prefix asserted below is unchanged; that prefix is a standing constraint on where any future binding may be inserted.
 
 Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `[/ or s] search  tab switch  u`: cell 30 is the `u` of `u uninstall`. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
@@ -256,6 +280,15 @@ Those counts are against the full row pane. A visible scrollbar takes one furthe
 The cell carries a glyph rather than a color, for the same reason the scrollbar thumb does: the cue must survive a monochrome theme. Because it lives inside the row string it inherits the selected-row style, including the monochrome reverse+bold, with no nested style. `↑` is an East-Asian-ambiguous-width character; the pinned Lip Gloss v2.0.6 measures it as one cell, and `•` and `█` are existing precedent for such a glyph here. A terminal configured to render ambiguous glyphs double-wide would shift every row by one cell at runtime — a terminal setting no test in this repository can observe. A unit assertion on the measured width therefore guards a dependency bump, not a terminal configuration.
 
 The marker is not appended after the version: at 32 columns the pane is 30 cells and the row is already full at the kind column, so a trailing marker would be clipped exactly where the list is the only pane. Nor is it folded into the kind column as `cask*`: that would make the name column width differ per row, and the kind column would stop aligning within a pane — the same alignment reason the info panel's label width is fixed. Nor is it folded into the selection-marker cell, which cannot carry two independent bits without a cryptic third glyph.
+Package rows render a selection marker, name, origin, optional version, and size. **[REWRITE ADDITION]** The row shape is ` <marker> <name-column> <origin-column>[ <version>] <size-column>`, replacing ` <marker> <name-column> <kind>[ <version>]`. The marker is `>` only for the selected row. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
+
+The `<origin-column>` is the parity kind column, repurposed. It is fixed-width per list rather than per row — `cask` at 4 cells on the cask list; `formula` or `dep` padded to 7 on the formula list — so the name column cannot shift between rows. In a single-kind list that column was a constant, so carrying `dep` there spends no width and turns a constant into the dependency marker; with the toggle off no row ever reads `dep`, so the default formula view is unchanged. `dep` is text, not color, per the monochrome precedent the tab bar sets. The column was repurposed rather than removed because it is parity behaviour and re-deriving every width would be the larger change.
+
+The `<size-column>` is 7 cells: one space plus 6 right-aligned. It is ALWAYS reserved once `rowWidth - 4 - originWidth - 7 >= 8`, and rendered blank until the section 5 pass lands, so the name column never reflows when sizes arrive seconds after first paint. `nameWidth = min(30, max(8, rowWidth - 4 - originWidth - sizeWidth))`. The worst case is the 32-column narrow layout with a scrollbar present: `rowWidth` 29, origin 7, size 7, giving a name column of 11 — so the pinned bound of at least 8 holds at every supported size.
+
+Sizes are spelled the way Homebrew's own info output spells them: `<n>KB` below 1024 KB, `<n>MB` below 1024 MB, `<n.n>GB` below 100 GB, and `<n>GB` above it. The value is at most 6 cells below 10000 GB, which is what the reserved column is sized for; a package with no measurement renders an empty column rather than a zero.
+
+**[REWRITE ADDITION]** The row column and the info pane do not agree, and must not be described as agreeing. The row is `du` allocated blocks rendered 1024-based; the info pane is Homebrew's own decimal byte sum. Measured: `llvm@22` renders 1.5GB in the row against 1.6GB in the pane, `qemu` 696MB against 729.1MB, and `go` 270MB against 239.8MB - 13% apart, and in the opposite direction from llvm. They answer the same question by different accounting, and a reader must not treat them as interchangeable.
 
 #### List scrollbar
 
@@ -314,6 +347,29 @@ The fields are parsed from the same `brew info` text, not from `brew info --json
 **[REWRITE ADDITION]** The one field not parsed from that text is the outdated verdict. It arrives on the section 3 package value from the section 5 outdated read, so exactly one component decides the word and the panel cannot form a second opinion from the two version strings it already parses. Those strings remain display detail; the verdict is the fact. The list row and this panel therefore render one value from one source and cannot disagree.
 
 On a new info target, set viewport Y offset to zero. There are no info-scrolling keys; the viewport supplies width-aware wrapping and clipping, not an additional navigation feature. Info loading continues and caches results even while the terminal is too narrow to show the pane.
+
+### Installed size measurement [REWRITE ADDITION]
+
+Every row carries a size, and the header carries a fleet total, from ONE `du` pass:
+
+1. `brew --cellar` and `brew --caskroom` (measured 55 ms and 45 ms) print the two roots. The paths are never hardcoded; these documented commands are the portable argv seam.
+2. `/usr/bin/du`, `-k`, `-d`, `1`, `<cellar>`, `<caskroom>` — one process, not one per package. Measured 2.1 s warm and 5.6 s cold over 11.3 GB, emitting 345 rows: 304 Cellar children, 39 Caskroom children, and one total per root.
+
+There is no argv-only alternative. `brew info --json=v2 --installed` is a single call carrying description, license, homepage, and install time, but it has no installed size — the same reason recorded at the end of the previous subsection. Per-package `brew info` would be 304 calls at ~400 ms. The filesystem read is not a shortcut around an API; there is no API.
+
+**Parse contract.** Rows are `<kb>\t<path>`. A direct child of a root is one package keyed by `filepath.Base`, bucketed by `filepath.Dir` against the two roots; a row whose path *is* a root carries that root's total, and the fleet total is the sum of the root rows actually seen. Malformed rows are skipped. `du` exits nonzero for a single unreadable subdirectory while still measuring everything else, so a nonzero exit keeps whatever parsed; only a pass that parsed nothing is reported as a failure.
+
+**Layout bound.** The assumption is one sentence and one directory level: each direct child of those two roots is one package, named by the package name. Verified as a zero-diff match in both directions against `brew list --formula` (304 Cellar children) and `brew list --cask -1` (39 Caskroom children).
+
+**Degradation.** A moved or renamed root makes `du` fail or match nothing; rows then render a blank size column and the header shows no total. Nothing claims a wrong number and nothing claims safety, matching the restraint the info pane already applies above.
+
+**What the number means.** It is Homebrew's own on-disk footprint under those two roots, which is what the fleet total is the sum of. For a cask whose Caskroom entry is a symlink into `/Applications` the row therefore reads the size of Homebrew's bookkeeping, not of the application bundle — measured example: `alt-tab` reads 12KB in the row while its info pane reports 12.2 MB, whereas `google-chrome` stores a real 683 MB bundle in the Caskroom and reads it. Symlinks are deliberately not followed: following them would count bytes Homebrew does not own, double-count a bundle reachable from two places, and break the property that the rows reconcile with the total.
+
+**Security invariant.** Names read from `du` stdout are only ever used as map keys, looked up against names that came from `brew list`. They never reach any argv. The size path therefore cannot introduce an unsafe package name, and `safePackageName`, `PrepareUninstall`, and `MapCommandFailure` are untouched. `du` shares the one capture/`WaitDelay`/failure-mapping body with brew, so no second command runner or failure mapper exists; the consequence is that the no-output exit fallback words itself as brew, which is preferred over duplicating the mapper for one message.
+
+`/usr/bin/du` is an absolute path, not a PATH lookup: macOS-only is already a non-goal above, `/usr/bin/du` is SIP-protected base system, and resolving it through the child environment would only add a hijack surface for a process this application spawns.
+
+The measurement is not persisted across runs and not revalidated. `r` is the documented remedy for stale inventory and applies equally here.
 
 ### Status precedence
 
@@ -436,6 +492,14 @@ The measured cost is a startup and load regression, and it is accepted: a load n
 
 Those figures hold only because the adapter suppresses Homebrew's auto-update; see section 5. They were first measured on a shell that exported `HOMEBREW_NO_AUTO_UPDATE=1`, which made the suppressed case look like the default one. Without the suppression the same read is unbounded rather than slow, so the number above is a cost only under the guarantee that section 5 now makes explicit.
 
+**[REWRITE ADDITION]** The section 5 size pass runs in its own `tea.Cmd`, started from `Init` beside the first list command and restarted only by the two cache-invalidation sites. Its contract:
+
+- It never runs in `Update`, never enters a loading mode, never activates the spinner, and never blocks or gates a list result. The list renders and is fully navigable before the measurement lands.
+- Its result is latest-only against a generation counter, exactly like list and info; a superseded result is discarded.
+- On failure it writes an ordinary, non-priority status and only into an empty status slot, so it can never displace `Uninstalled <name>` or any other real message.
+- It registers its context and completion handle with the supervisor, so quitting cancels it and awaits its typed result message before exit, per section 13 and acceptance criterion 18.
+- When the measurement lands while a size sort is active, the retained list is re-ordered. Selection resets to the first row, because the order changed underneath the cursor; this can happen at most once, and only if `o` was pressed before the pass landed.
+
 ### List cache
 
 **[REWRITE ADDITION]** Every successful list result is retained per kind. A kind switch to a retained kind is served from that retention: it starts no command, enters no loading state, and renders the target list in the same frame as the key press. Only a kind not retained this session starts a `loadSwitch` command. Parity re-ran `brew list` on every switch, so each one cost a fresh empty pane.
@@ -448,6 +512,8 @@ Retention is dropped wholesale — both kinds — at exactly the two sites that 
 2. A committed uninstall, before its `loadAfterUninstall` reload starts. Uninstalling one kind can change the other, so both are dropped rather than reasoning about which.
 
 The info cache and the list cache are invalidated together at both sites and must stay that way: anything that can change what `brew info` prints can change what `brew list` prints. After either site the reload repopulates only the active kind, so the next switch is a miss and re-lists.
+
+**[REWRITE ADDITION]** The section 5 size map is a third cache dropped at exactly those same two sites and only there, for the same reason: anything that can change what `brew list` prints can change what the Cellar weighs. The invalidation function returns the command that restarts the size pass, so both sites restart it in lockstep by construction rather than by each remembering to. A kind switch and the `d`/`o` toggles are explicitly not invalidation sites — they change the view, not the inventory — and must not remeasure. A failed size pass caches nothing, mirroring the rule that a failed list result caches nothing; it also does not discard a previous good measurement.
 
 Retention is per session and is not revalidated. An install or uninstall performed in another terminal is not observed until `r`. Parity's per-switch re-list masked that, at the cost of the empty pane on every switch; `r` is the explicit remedy.
 
@@ -465,7 +531,7 @@ The key, priority-status, and footer contracts while a list command is active ar
 |---|---|---|---|
 | Startup cask load | `Loading casks...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Kind-switch load | `Loading casks...` or `Loading formulae...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Cached kind switch | none; no command runs | `[/ or s] search  tab switch  u uninstall  t theme  r refresh  q quit` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
+| Cached kind switch | none; no command runs | `[/ or s] search  tab switch  u uninstall  t theme  r refresh  d deps  o sort  q quit` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
 | User refresh | `Refreshing casks...` or `Refreshing formulae...` | `q quit` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Post-uninstall reload | `Reloading casks...` or `Reloading formulae...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
 
@@ -742,6 +808,8 @@ func New(homebrew Homebrew, info *info.Loader, uninstaller Uninstaller) (tea.Mod
 func (s *Supervisor) Cleanup(context.Context) error
 ```
 
+**[REWRITE ADDITION]** `Sizes` is placed on the `Homebrew` interface rather than passed as a fourth parameter to `ui.New`, because that signature is pinned directly above and because the measurement genuinely is a Homebrew read: it needs `brew --cellar` and `brew --caskroom`.
+
 `cmd/lazybrew/main.go` retains the returned supervisor before calling `tea.NewProgram(...).Run()`. The model and every list/info/uninstall operation register their contexts and completion handles with that same supervisor. `Cleanup` is idempotent, applies the bounded cancellation/await contract in section 13, and is the documented post-`Run` startup/runtime-error fallback; main never has to reach into UI or adapter internals.
 
 The module's external interface is Bubble Tea's `Init`/`Update`/`View`. Its implementation owns modes, keys, list model, viewport, spinner, textinput, themes, geometry, status precedence, immutable confirmation, and translation of adapter/job results into state. It does not know command argv construction, socket framing, peer authentication, or process cleanup.
@@ -758,7 +826,17 @@ type Homebrew interface {
     Outdated(context.Context, Kind) ([]string, error) // [REWRITE ADDITION]
     Info(context.Context, Package) (string, error)
     Uses(context.Context, Package) ([]string, error) // [REWRITE ADDITION]
+    Sizes(context.Context) (Sizes, error)            // [REWRITE ADDITION]
 }
+
+// [REWRITE ADDITION] Installed size in KB, keyed by kind and name.
+type Sizes struct {
+    Formula map[string]int64
+    Cask    map[string]int64
+    Total   int64
+}
+
+func (s Sizes) KB(kind Kind, name string) (int64, bool)
 
 type ResolvedCommand struct {
     Path string
@@ -885,7 +963,7 @@ The cutover is complete: no Python compatibility shim, alias, duplicate executab
 Parity and rewrite are complete only when all of the following are true:
 
 1. Startup selects casks and uses the exact list commands and parser.
-2. Formula listing excludes dependency-only formulae through `--installed-on-request`.
+2. **[REWRITE ADDITION]** Formula listing enumerates every installed formula through `brew list --formula` and marks dependency-only rows from `brew list --formula --no-installed-on-request`; the default view hides the marked rows and `d` reveals them. This replaces "excludes dependency-only formulae through `--installed-on-request`", which also hid explicitly requested tap formulae.
 3. Every mode accepts exactly the keys specified here; confirmation accepts lowercase `y` only and uppercase `Y` cancels; list-loading and post-uninstall reload use their exact key/status/footer tables.
 4. Search is case-insensitive substring matching over name, version, and kind, preserves source order, and has the specified accept/cancel/reset behavior, including Bubble Tea v2 backspace versus forward-Delete semantics.
 5. Selection and scrolling never wrap or leave valid bounds after filtering, reload, refresh, kind switch, or an empty result.
@@ -905,6 +983,10 @@ Parity and rewrite are complete only when all of the following are true:
 19. The four module seams are tested through fake adapters/jobs, and real integration tests cross the same interfaces rather than reaching into implementation internals.
 20. Python source, tests, bytecode, and cancelled askpass experiments are deleted in the same clean cutover.
 21. **[REWRITE ADDITION]** Outdated marking is sourced only from `brew outdated` per kind, never with `--greedy` and never from a version comparison; appears identically in the list row's freshness cell and the info panel's `Version` row; rides the retained list across a cached kind switch without starting a command; is wholly absent when the outdated read fails, without failing or unretaining the load; and never renders `(up to date)` for a package Homebrew reports as outdated.
+21. **[REWRITE ADDITION]** Dependency-only rows are hidden at startup and revealed only by `d`, marked in the origin column, served from retention with no command in either direction, and the installed count follows the toggle.
+22. **[REWRITE ADDITION]** Every row carries a size once one cached `du` pass has landed; the list renders and is fully navigable before it lands; the size column is reserved so no column reflows when it does; and an unmeasured package renders blank rather than zero.
+23. **[REWRITE ADDITION]** `o` orders rows by size largest-first and back to source order, the query filter preserves that order, and the fleet total is visible in the header.
+24. **[REWRITE ADDITION]** The size map is invalidated at exactly the two existing cache-invalidation sites and nowhere else, the retained list is never mutated by the filter or the sort, and the size child is cancelled and reaped on every exit path.
 
 ## 17. Verification matrix
 
@@ -915,6 +997,13 @@ Parity and rewrite are complete only when all of the following are true:
 | Keys/modes | Bubble Tea model tests send every listed key/message plus representative unlisted keys in every mode, including `KeyBackspace`, separately delivered `ctrl+h`, physical `KeyDelete`, and `tea.PasteMsg`. | Exact transition tables; `y` confirms, `Y` cancels, search/password steal global letters, loading modes supervise `q`, progress/reload ignore controls, physical Delete and password paste are ignored. |
 | Filtering/selection | Model tests edit/accept/cancel queries, switch kinds, reload shorter/empty lists, and resize viewports. | Source-order substring results and all indices/offsets remain valid. |
 | Layout | Golden or structural view tests at 31×8, 32×9, 71×N, 72×N, narrow names, long names, long status, and multiline info. **[REWRITE ADDITION]** Plus: an outdated row renders ` >↑ ` and a fresh row ` >  ` at identical total width; the freshness cell is independent of the selection marker; and the measured width of `↑` is asserted to be one cell. | Minimum-size message, split threshold, clipping, wrapping, status, and no border/divider overwrite; at width 32 the ANSI-stripped normal footer is exactly the 30-cell prefix specified in section 6; every row is exactly the terminal width at 32, 72, and 120 columns with marked and unmarked rows both on screen, and the section 6 name-column counts hold. |
+| Command vectors | Table-driven unit tests for both kinds and list/info/uninstall, including unsafe names. **[REWRITE ADDITION]** Also both formula list vectors as an ordered invocation sequence, the two root vectors, and the `du` vector. | Exact argv equality, including the complete ordered sequence of invocations per operation; shell path is never used; unsafe info/uninstall text is exact and no process starts. |
+| Installed size **[REWRITE ADDITION]** | Unit tests over real captured `du` output for exact values and both root totals; malformed, out-of-level, and foreign rows; nonzero exit with partial output; a missing root; both roots missing; an empty root path; missing brew. An integration test runs the real `/usr/bin/du` over a Homebrew-shaped temporary tree. | Exact per-package KB and fleet total; unreadable rows skipped rather than guessed; partial measurement kept and a wholly failed pass reported; `-k` and `-d 1` verified by observed behaviour rather than by a recorded string; names from `du` never reach an argv. |
+| Dependency visibility **[REWRITE ADDITION]** | Model tests toggle `d` on both lists, assert the visible set, the status, the installed count, that no command starts, that retention is not mutated, and that a round trip is idempotent. | Marked rows hidden by default and revealed by `d`; cask list changes status only and preserves selection; `listCalls` unchanged; retained slice byte-identical after any sequence of toggles. |
+| Parsing/errors | Unit tests for blank lines, empty/multiple versions, missing brew, generic spawn error, stderr/stdout/fallback exit errors, and shared preparation/mapping calls. | Results and strings exactly match sections 3 and 5; uninstall has no duplicate validator, argv builder, resolver, or failure mapper. |
+| Keys/modes | Bubble Tea model tests send every listed key/message plus representative unlisted keys in every mode, including `KeyBackspace`, separately delivered `ctrl+h`, physical `KeyDelete`, and `tea.PasteMsg`. | Exact transition tables; `y` confirms, `Y` cancels, search/password steal global letters, loading modes supervise `q`, progress/reload ignore controls, physical Delete and password paste are ignored. |
+| Filtering/selection | Model tests edit/accept/cancel queries, switch kinds, reload shorter/empty lists, and resize viewports. | Source-order substring results and all indices/offsets remain valid. |
+| Layout | Golden or structural view tests at 31×8, 32×9, 71×N, 72×N, narrow names, long names, long status, and multiline info. **[REWRITE ADDITION]** Also 120×N, the origin and size columns, and the header total, each asserted with the measurement both landed and absent. | Minimum-size message, split threshold, clipping, wrapping, status, and no border/divider overwrite; at width 32 the ANSI-stripped normal footer is exactly the 30-cell prefix specified in section 6, unchanged by the two added bindings. **[REWRITE ADDITION]** Every row is exactly the terminal width in both size states; the origin column sits at identical cells in both, so nothing reflows when sizes land; the total is right aligned, present at the 32-column minimum, absent before measuring, and omitted rather than clipped when it cannot fit. |
 | Themes | View tests for cycle order and every role; no-color rendering test. | Exact table values; Lazygit selected row not bold with color; reverse+bold without color. |
 | Latest-only info | Controlled fake load function completes active/pending requests in adversarial order, including completed-not-handled revisit, refresh during flight, and A active → B pending → A reselected. | One active/one latest pending; current-generation cache only; stale result never renders/caches; after A completes in the A→B→A case, B never starts. |
 | Refresh/list loading | Model plus fake Homebrew tests cover every section 8 row, success/error, filtered query, fewer rows, and in-flight old info. **[REWRITE ADDITION]** Plus: marks survive a cached kind switch with no extra list call; a failed outdated read yields a successful, retained, unmarked list; an outdated name the inventory never shows marks nothing. | Exact status/footer/key behavior, cache invalidation, list/status result, selection clamp, and fresh info request; marks are on the retained value; a failed outdated read changes neither status nor retention. |

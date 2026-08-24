@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,7 +62,11 @@ type packageItem struct{ packageValue brew.Package }
 
 func (i packageItem) FilterValue() string {
 	p := i.packageValue
-	return p.Name + " " + p.Version + " " + string(p.Kind)
+	// The rendered origin token, not only the kind. A dependency row displays
+	// "dep" and no longer displays "formula", so matching on kind alone would
+	// make the row unreachable by the word on it and reachable by a word that is
+	// not. Both are included: "formula" still finds every formula.
+	return p.Name + " " + p.Version + " " + string(p.Kind) + " " + strings.TrimSpace(originColumn(p))
 }
 
 type packageDelegate struct{}
@@ -79,6 +85,8 @@ type Supervisor struct {
 	closing           bool
 	listCancel        context.CancelFunc
 	listDone          <-chan struct{}
+	sizesCancel       context.CancelFunc
+	sizesDone         <-chan struct{}
 	startCancel       context.CancelFunc
 	startDone         <-chan struct{}
 	job               uninstall.Job
@@ -105,6 +113,26 @@ func (s *Supervisor) clearList(done <-chan struct{}) {
 	s.mu.Lock()
 	if s.listDone == done {
 		s.listCancel, s.listDone = nil, nil
+	}
+	s.mu.Unlock()
+}
+
+func (s *Supervisor) setSizes(cancel context.CancelFunc, done <-chan struct{}) {
+	s.mu.Lock()
+	closing := s.closing
+	if !closing {
+		s.sizesCancel, s.sizesDone = cancel, done
+	}
+	s.mu.Unlock()
+	if closing {
+		cancel()
+	}
+}
+
+func (s *Supervisor) clearSizes(done <-chan struct{}) {
+	s.mu.Lock()
+	if s.sizesDone == done {
+		s.sizesCancel, s.sizesDone = nil, nil
 	}
 	s.mu.Unlock()
 }
@@ -170,12 +198,16 @@ func (s *Supervisor) cancel() {
 	s.mu.Lock()
 	s.closing = true
 	listCancel := s.listCancel
+	sizesCancel := s.sizesCancel
 	startCancel := s.startCancel
 	job := s.job
 	s.mu.Unlock()
 
 	if listCancel != nil {
 		listCancel()
+	}
+	if sizesCancel != nil {
+		sizesCancel()
 	}
 	if startCancel != nil {
 		startCancel()
@@ -194,11 +226,12 @@ func (s *Supervisor) Cleanup(ctx context.Context) error {
 
 	s.mu.Lock()
 	listDone := s.listDone
+	sizesDone := s.sizesDone
 	startDone := s.startDone
 	jobDone := s.jobDone
 	s.mu.Unlock()
 
-	waits := []<-chan struct{}{listDone, startDone, jobDone}
+	waits := []<-chan struct{}{listDone, sizesDone, startDone, jobDone}
 	if s.info != nil {
 		waits = append(waits, s.info.Done())
 	}
@@ -274,6 +307,13 @@ type listResultMsg struct {
 	done     <-chan struct{}
 }
 
+type sizesResultMsg struct {
+	id    uint64
+	sizes brew.Sizes
+	err   error
+	done  <-chan struct{}
+}
+
 type jobStartedMsg struct {
 	id        uint64
 	job       uninstall.Job
@@ -326,6 +366,13 @@ type model struct {
 	listCancel    context.CancelFunc
 	infoPending   bool
 	listCache     map[brew.Kind][]brew.Package
+
+	sizes        *brew.Sizes
+	sizesID      uint64
+	sizesCancel  context.CancelFunc
+	sizesPending bool
+	showDeps     bool
+	sortBySize   bool
 
 	status           string
 	priority         bool
@@ -400,7 +447,7 @@ func substringFilter(term string, targets []string) []list.Rank {
 }
 
 func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.startList(loadStartup, 0), m.spinner.Tick)
+	return tea.Batch(m.startList(loadStartup, 0), m.startSizes(), m.spinner.Tick)
 }
 
 func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -427,6 +474,8 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case listResultMsg:
 		return m, m.handleListResult(msg)
+	case sizesResultMsg:
+		return m, m.handleSizesResult(msg)
 	case jobStartedMsg:
 		return m, m.handleJobStarted(msg)
 	case jobStartFailedMsg:
@@ -519,10 +568,29 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	case "t", "T":
 		m.themeIndex = (m.themeIndex + 1) % len(themes)
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
+	case "d", "D":
+		m.showDeps = !m.showDeps
+		m.status, m.priority = "Dependencies: hidden", false
+		if m.showDeps {
+			m.status = "Dependencies: shown"
+		}
+		// Casks have no dependency relation, so only the status changes there. The
+		// flag still flips, so the key is never silently dead and a later `tab`
+		// lands in the requested state.
+		if m.kind == brew.Formula {
+			return m.reorder()
+		}
+	case "o", "O":
+		m.sortBySize = !m.sortBySize
+		m.status, m.priority = "Sort: name", false
+		if m.sortBySize {
+			m.status = "Sort: size"
+		}
+		return m.reorder()
 	case "r", "R":
 		selection := m.list.Index()
-		m.invalidateCaches()
-		return tea.Batch(m.startList(loadRefresh, selection), m.spinner.Tick)
+		sizesCmd := m.invalidateCaches()
+		return tea.Batch(m.startList(loadRefresh, selection), sizesCmd, m.spinner.Tick)
 	case "q", "Q":
 		return m.beginQuit(0)
 	}
@@ -548,12 +616,18 @@ func (m *model) switchKind() tea.Cmd {
 	return tea.Batch(m.startList(loadSwitch, 0), m.spinner.Tick)
 }
 
-// invalidateCaches drops the info cache and the list cache together. Every site
-// that invalidates one must invalidate the other: anything that can change what
-// `brew info` prints can also change what `brew list` prints.
-func (m *model) invalidateCaches() {
+// invalidateCaches drops the info cache, the list cache, and the size map
+// together. Every site that invalidates one must invalidate the others: anything
+// that can change what `brew info` prints can also change what `brew list`
+// prints and what the Cellar weighs.
+//
+// It returns the command that restarts the size pass, so the two call sites stay
+// in lockstep by construction rather than by both remembering to do it.
+func (m *model) invalidateCaches() tea.Cmd {
 	m.info.Refresh(nil)
 	clear(m.listCache)
+	m.sizes = nil
+	return m.startSizes()
 }
 
 func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
@@ -832,10 +906,10 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 		m.finishUninstall(flattenStatus(result.Err.Error()))
 	default:
 		selection := m.list.Index()
-		m.invalidateCaches()
+		sizesCmd := m.invalidateCaches()
 		m.mode = modeUninstall
 		m.spinnerActive = true
-		return tea.Batch(m.startList(loadAfterUninstall, selection), m.spinner.Tick)
+		return tea.Batch(m.startList(loadAfterUninstall, selection), sizesCmd, m.spinner.Tick)
 	}
 	return nil
 }
@@ -923,6 +997,75 @@ func markOutdated(packages []brew.Package, names []string, known bool) []brew.Pa
 	return packages
 }
 
+// startSizes measures the whole fleet in one pass, in its own command.
+//
+// It deliberately does not touch m.loading, m.spinnerActive, or the priority
+// status: the list must render and be fully navigable before sizes arrive, and a
+// size failure must never displace a message like `Uninstalled <name>`. The
+// closure captures only the context and the id; every model mutation happens in
+// Update when the typed result lands.
+func (m *model) startSizes() tea.Cmd {
+	// Cancel the pass this one supersedes before overwriting its handles. Without
+	// this, r pressed twice inside the measurement window leaves the first du
+	// running with its context leaked and its completion handle no longer
+	// reachable from the supervisor, which can then neither cancel nor await it.
+	if m.sizesCancel != nil {
+		m.sizesCancel()
+	}
+	m.sizesID++
+	id := m.sizesID
+	m.sizesPending = true
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.supervisor.setSizes(cancel, done)
+	m.sizesCancel = cancel
+	homebrew := m.homebrew
+	return func() tea.Msg {
+		sizes, err := homebrew.Sizes(ctx)
+		close(done)
+		return sizesResultMsg{id: id, sizes: sizes, err: err, done: done}
+	}
+}
+
+func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
+	m.supervisor.clearSizes(msg.done)
+	if msg.id != m.sizesID {
+		return nil
+	}
+	if m.sizesCancel != nil {
+		m.sizesCancel()
+	}
+	m.sizesCancel = nil
+	m.sizesPending = false
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+	if msg.err != nil {
+		// Ordinary, never priority, and only into an empty slot, so a failed
+		// measurement cannot overwrite a real message. A failure caches nothing,
+		// mirroring a failed list result.
+		if m.status == "" {
+			m.status, m.priority = flattenStatus(msg.err.Error()), false
+		}
+		return nil
+	}
+	sizes := msg.sizes
+	m.sizes = &sizes
+	// Sizes arriving is the moment a size sort requested earlier becomes
+	// meaningful, so re-order from retention. ponytail: this resets selection to
+	// the top, because the order changed underneath the cursor. It happens at
+	// most once, only in the first seconds, and only if `o` was pressed before
+	// the pass landed. Preserving the selected package by name is the fix if that
+	// proves annoying.
+	if m.sortBySize && !m.loading && (m.mode == modeNormal || m.mode == modeSearch) {
+		if cached, ok := m.listCache[m.kind]; ok {
+			m.setPackages(cached, 0)
+			return m.selectInfo()
+		}
+	}
+	return nil
+}
+
 func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 	m.supervisor.clearList(msg.done)
 	if msg.id != m.loadID {
@@ -968,14 +1111,48 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 	return m.selectInfo()
 }
 
+// setPackages is the only place the dependency filter and the size sort live, so
+// no caller can disagree about what the list holds. Every path through it — a
+// list result, a cached kind switch, a refresh, `d`, `o`, and a late size pass —
+// gets the same transform.
+//
+// The retained slice is never mutated: rows are copied into a new slice before
+// sorting, because listCache shares the backing array and sorting in place would
+// corrupt retention and make `d` non-idempotent.
 func (m *model) setPackages(packages []brew.Package, selection int) {
-	items := make([]list.Item, len(packages))
-	for i, pkg := range packages {
+	visible := make([]brew.Package, 0, len(packages))
+	for _, pkg := range packages {
+		if pkg.Dependency && !m.showDeps {
+			continue
+		}
+		visible = append(visible, pkg)
+	}
+	if m.sortBySize && m.sizes != nil {
+		slices.SortStableFunc(visible, func(a, b brew.Package) int {
+			aKB, _ := m.sizes.KB(a.Kind, a.Name)
+			bKB, _ := m.sizes.KB(b.Kind, b.Name)
+			return cmp.Compare(bKB, aKB)
+		})
+	}
+
+	items := make([]list.Item, len(visible))
+	for i, pkg := range visible {
 		items[i] = packageItem{packageValue: pkg}
 	}
 	m.list.SetItems(items)
 	m.list.SetFilterText(m.query)
 	m.clampSelection(selection)
+}
+
+// reorder re-runs setPackages against the retained list for the active kind. It
+// starts no command: `d` and `o` are pure re-renders, instant in both directions.
+func (m *model) reorder() tea.Cmd {
+	cached, ok := m.listCache[m.kind]
+	if !ok {
+		return nil
+	}
+	m.setPackages(cached, 0)
+	return m.selectInfo()
 }
 
 func (m *model) applyFilter(selection int) {
@@ -1087,7 +1264,7 @@ func (m *model) beginQuit(exitCode int) tea.Cmd {
 }
 
 func (m *model) finishQuit() tea.Cmd {
-	if m.mode != modeQuitting || m.loading || m.infoPending || m.startPending || m.jobPending {
+	if m.mode != modeQuitting || m.loading || m.infoPending || m.sizesPending || m.startPending || m.jobPending {
 		return nil
 	}
 	if m.supervisor.cleanupError() != nil {

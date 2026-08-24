@@ -67,14 +67,25 @@ func run(ctx context.Context, args []string) ([]byte, []byte, error) {
 	if err != nil {
 		return nil, nil, MapCommandFailure(err, nil, nil)
 	}
+	return runTool(ctx, path, env, args)
+}
 
+// runTool is the one capture/WaitDelay/failure-mapping body, shared by brew and
+// by the size measurement's du so that neither grows a second command runner nor
+// a second failure mapper.
+//
+// A du failure therefore reports du's own stderr, which is what du writes on the
+// only failures that occur in practice: an unreadable or missing root. Only the
+// no-output fallback still words itself as brew, which is preferred over
+// duplicating MapCommandFailure for one message.
+func runTool(ctx context.Context, path string, env, args []string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append(env, noAutoUpdate)
 	cmd.WaitDelay = 2 * time.Second
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), MapCommandFailure(err, stdout.Bytes(), stderr.Bytes())
 }
 
