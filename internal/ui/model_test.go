@@ -18,7 +18,7 @@ import (
 
 type fakeHomebrew struct {
 	packages     map[brew.Kind][]brew.Package
-	outdated     map[brew.Kind][]string
+	outdated     map[brew.Kind][]brew.OutdatedPackage
 	outdatedErr  error
 	err          error
 	listStarted  chan struct{}
@@ -66,11 +66,11 @@ func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package
 	return copyOfPackages, nil
 }
 
-func (f *fakeHomebrew) Outdated(_ context.Context, kind brew.Kind) ([]string, error) {
+func (f *fakeHomebrew) Outdated(_ context.Context, kind brew.Kind) ([]brew.OutdatedPackage, error) {
 	if f.outdatedErr != nil {
 		return nil, f.outdatedErr
 	}
-	return append([]string(nil), f.outdated[kind]...), nil
+	return append([]brew.OutdatedPackage(nil), f.outdated[kind]...), nil
 }
 
 func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
@@ -946,7 +946,10 @@ func TestOutdatedMarksRideTheListCacheAcrossASwitch(t *testing.T) {
 		// "Beta" is the only visible cask reported; "ghostwriter" is a name the
 		// inventory never shows, as `brew outdated --formula` legitimately reports
 		// dependency-only formulae the list filters out.
-		outdated: map[brew.Kind][]string{brew.Cask: {"Beta", "ghostwriter"}},
+		outdated: map[brew.Kind][]brew.OutdatedPackage{brew.Cask: {
+			{Name: "Beta", Installed: "2.0", Latest: "2.1"},
+			{Name: "ghostwriter", Installed: "1.0", Latest: "1.1"},
+		}},
 	}
 	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
@@ -985,7 +988,7 @@ func TestAFailedOutdatedReadStillLoadsAnUnmarkedList(t *testing.T) {
 		packages: map[brew.Kind][]brew.Package{
 			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 		},
-		outdated:    map[brew.Kind][]string{brew.Cask: {"Alpha"}},
+		outdated:    map[brew.Kind][]brew.OutdatedPackage{brew.Cask: {{Name: "Alpha", Latest: "2.0"}}},
 		outdatedErr: errors.New("brew outdated exploded"),
 	}
 	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())

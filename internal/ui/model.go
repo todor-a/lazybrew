@@ -1037,7 +1037,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			wg            sync.WaitGroup
 			packages      []brew.Package
 			listErr       error
-			outdated      []string
+			outdated      []brew.OutdatedPackage
 			outdatedKnown bool
 		)
 		wg.Add(2)
@@ -1050,8 +1050,8 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			// A failed outdated read is absorbed, exactly as a failed dependent
 			// lookup is: the list still loads and simply carries no marks. Absence
 			// of evidence must never render as an assurance.
-			if names, err := homebrew.Outdated(ctx, kind); err == nil {
-				outdated, outdatedKnown = names, true
+			if rows, err := homebrew.Outdated(ctx, kind); err == nil {
+				outdated, outdatedKnown = rows, true
 			}
 		}()
 		wg.Wait()
@@ -1071,22 +1071,33 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 // outdated set is matched by name against the visible rows only; for formulae it
 // legitimately also names the dependency-only ones the list never shows, so its
 // size and the list's are unrelated.
-func markOutdated(packages []brew.Package, names []string, known bool) []brew.Package {
+//
+// A marked row also gains the versions the verdict came with: LatestVersion
+// always, and Version only where the inventory left it blank — both `brew
+// list` forms print bare names, so without this the row would show an arrow
+// pointing from nothing.
+func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, known bool) []brew.Package {
 	// Stamped on every row, not only the named ones, so the detail panel can tell
 	// "Homebrew says this is current" from "Homebrew was never asked".
 	for i := range packages {
 		packages[i].OutdatedKnown = known
 	}
-	if len(names) == 0 {
+	if len(outdated) == 0 {
 		return packages
 	}
-	outdated := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		outdated[name] = struct{}{}
+	byName := make(map[string]brew.OutdatedPackage, len(outdated))
+	for _, row := range outdated {
+		byName[row.Name] = row
 	}
 	for i := range packages {
-		if _, ok := outdated[packages[i].Name]; ok {
-			packages[i].Outdated = true
+		row, ok := byName[packages[i].Name]
+		if !ok {
+			continue
+		}
+		packages[i].Outdated = true
+		packages[i].LatestVersion = row.Latest
+		if packages[i].Version == "" {
+			packages[i].Version = row.Installed
 		}
 	}
 	return packages

@@ -416,6 +416,32 @@ func TestOutdatedRowCarriesAFixedFreshnessCell(t *testing.T) {
 	}
 }
 
+// The offered version renders as "installed \u2192 latest" only on rows Homebrew's
+// verdict marked; a fresh row with the same versions on it must stay silent, so
+// the arrow can never claim an upgrade the \u2191 cell does not.
+func TestOutdatedRowShowsInstalledAndLatestVersions(t *testing.T) {
+	m, _ := newTestModel(t)
+	plain := func(pkg brew.Package) string {
+		// 60 cells: wide enough that the version survives the end-of-line clip,
+		// which is the layout where the arrow is expected to appear at all.
+		return ansiSequence.ReplaceAllString(m.packageLine(pkg, false, 60), "")
+	}
+	stale := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Outdated: true, LatestVersion: "2.0"})
+	if !strings.Contains(stale, "1.0 \u2192 2.0") {
+		t.Fatalf("outdated row=%q, want the installed and offered versions", stale)
+	}
+	fresh := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, LatestVersion: "2.0"})
+	if strings.Contains(fresh, "\u2192") {
+		t.Fatalf("unmarked row=%q, want no version arrow", fresh)
+	}
+	// A revision bump reports the same version string on both sides; an arrow
+	// from a version to itself would read as noise, not news.
+	same := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Outdated: true, LatestVersion: "1.0"})
+	if strings.Contains(same, "\u2192") {
+		t.Fatalf("same-version row=%q, want no version arrow", same)
+	}
+}
+
 // The freshness cell is one terminal cell wide by assumption, and every pinned
 // row width depends on it. A lipgloss bump that changed its measured width would
 // otherwise shift every row at runtime with no test noticing.

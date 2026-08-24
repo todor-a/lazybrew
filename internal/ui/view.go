@@ -333,6 +333,13 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	line := " " + marker + freshness + " " + name + " " + origin
 	if pkg.Version != "" {
 		line += " " + pkg.Version
+		// The offered version renders only on rows Homebrew's verdict marked, so
+		// the arrow can never claim an upgrade the ↑ cell does not. It rides the
+		// same end-of-line clipping as the version, so a narrow pane loses the
+		// detail, never the columns.
+		if pkg.Outdated && pkg.LatestVersion != "" && pkg.LatestVersion != pkg.Version {
+			line += " \u2192 " + pkg.LatestVersion
+		}
 	}
 	if sizeWidth > 0 {
 		line = fit(line, width-sizeWidth) + " " + padLeft(m.rowSize(pkg), sizeWidth-1)
