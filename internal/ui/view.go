@@ -507,6 +507,17 @@ func (m *model) infoLines(width, height int) []string {
 	return lines
 }
 
+// queueVersions names what an entry will do to the package, not only which
+// package: the upgrade's from → to when brew reported one. An uninstall or an
+// unknown latest adds nothing - the name already says everything the entry
+// knows for sure.
+func queueVersions(pkg brew.Package) string {
+	if pkg.LatestVersion == "" || pkg.LatestVersion == pkg.Version || pkg.Version == "" {
+		return ""
+	}
+	return " " + pkg.Version + " → " + pkg.LatestVersion
+}
+
 // overlayQueue claims the info pane's bottom rows while a job runs: the
 // running entry first, then the queue in run order, so the whole run is
 // readable in one place while the status row only ever shows the latest event.
@@ -519,9 +530,9 @@ func (m *model) overlayQueue(lines []string, width, height int) {
 	if m.operation == nil || height < 4 {
 		return
 	}
-	rows := []string{"Queue", m.spinner.View() + " " + words(m.verb).gerund + " " + m.operation.Name + "..."}
+	rows := []string{"Queue", m.spinner.View() + " " + words(m.verb).gerund + " " + m.operation.Name + queueVersions(*m.operation) + "..."}
 	for _, entry := range m.queue {
-		rows = append(rows, "queued · "+words(entry.verb).lower+" "+entry.pkg.Name)
+		rows = append(rows, "queued · "+words(entry.verb).lower+" "+entry.pkg.Name+queueVersions(entry.pkg))
 	}
 	// At most half the pane; the overflow row keeps the hidden count honest.
 	limit := max(2, height/2)
