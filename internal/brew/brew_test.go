@@ -111,7 +111,7 @@ func TestListCommandVectors(t *testing.T) {
 func TestOutdatedCommandVectors(t *testing.T) {
 	// One report carrying both arrays, as brew always prints it; each kind must
 	// read only its own array, because a formula and a cask can share a name.
-	const report = `{"formulae":[{"name":"vault","installed_versions":["1.16.0","1.17.0"],"current_version":"1.18.1"}],` +
+	const report = `{"formulae":[{"name":"hashicorp/tap/vault","installed_versions":["1.16.0","1.17.0"],"current_version":"1.18.1"}],` +
 		`"casks":[{"name":"postman","installed_versions":["12.24.4"],"current_version":"12.24.5"}]}`
 	tests := []struct {
 		name string

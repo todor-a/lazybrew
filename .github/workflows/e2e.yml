@@ -1,0 +1,52 @@
+name: Black-box E2E
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  stable:
+    if: github.event_name != 'schedule'
+    name: stable (${{ matrix.os }})
+    strategy:
+      matrix:
+        os:
+          - macos-15
+          - macos-15-intel
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
+        with:
+          stable: true
+      - run: brew --version
+      - run: go test -count=1 -tags=e2e ./e2e
+
+  head:
+    if: github.event_name != 'pull_request'
+    name: Homebrew main (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: Homebrew/actions/setup-homebrew@a657b8b0cd35d0f65cce41fce9b24cf054b49869
+        with:
+          stable: false
+      - run: brew --version
+      - run: go test -count=1 -tags=e2e ./e2e
