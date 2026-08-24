@@ -17,7 +17,7 @@ Runs the two mutating brew verbs with administrator authentication kept OUT of t
 
 ### Working In This Directory
 - Passwords: never logged, never cached, wiped after use; any change touching password bytes needs explicit review of every copy made.
-- The helper re-entry (`RunHelperFromEnv`) is invoked from cmd/lazybrew before anything else; env is canonicalized per job (SUDO_ASKPASS socket).
+- The helper re-entry (`RunHelperFromEnv`) is invoked from cmd/lazybrew before anything else. Detection is path-first: brew scrubs the LAZYBREW_* env markers, so SUDO_ASKPASS points at a per-job `lazybrew-askpass` symlink inside the private socket directory and the helper recognises itself by argv[0]; the env route survives for direct (unscrubbed) children and tests.
 - One job at a time is a UI-level AND runner-level invariant; the ui queue serializes on top, it does not parallelize.
 - Cleanup runs under a deadline (main gives 20s); phases must stay bounded.
 
