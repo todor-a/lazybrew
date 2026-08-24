@@ -330,9 +330,12 @@ func TestInfoPaneShowsLoadingWhileALoadClearsTheSelection(t *testing.T) {
 // scrollbarRows returns the last cell of each content row of the list pane.
 func scrollbarRows(m *model) []string {
 	lines := strippedLines(m)
-	column := make([]string, 0, m.contentRows)
-	for row := 0; row < m.contentRows; row++ {
-		pane := []rune(lines[3+row])
+	rows := max(0, m.contentRows-1)
+	column := make([]string, 0, rows)
+	// The first content row is the table header; the bar spans only the list
+	// rows below it.
+	for row := 0; row < rows; row++ {
+		pane := []rune(lines[4+row])
 		// row starts after the left border and ends before the divider.
 		column = append(column, string(pane[m.width/2-1]))
 	}
@@ -355,7 +358,7 @@ func TestScrollbarAppearsOnlyWhenTheListOverflows(t *testing.T) {
 	}
 
 	// Two rows of viewport against three packages forces two pages.
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 	column := scrollbarRows(m)
 	thumbs := 0
 	for _, cell := range column {
@@ -373,7 +376,7 @@ func TestScrollbarAppearsOnlyWhenTheListOverflows(t *testing.T) {
 
 func TestScrollbarThumbSitsFlushAtBothEnds(t *testing.T) {
 	m, _ := newTestModel(t)
-	m.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
 
 	first := scrollbarRows(m)
 	if first[0] != "█" {
@@ -463,7 +466,7 @@ func TestFooterListsEveryNormalKey(t *testing.T) {
 }
 
 // The size column is reserved before the measurement lands, so the name and
-// origin columns sit at the same cells either way and nothing reflows when sizes
+// dep columns sit at the same cells either way and nothing reflows when sizes
 // arrive seconds after first paint.
 // The column is reserved on the formula list before the measurement arrives, so
 // a late size cannot reflow rows the user is already reading. The cask list
@@ -474,18 +477,18 @@ func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
 
 	for _, width := range []int{32, 72, 120} {
 		m.Update(tea.WindowSizeMsg{Width: width, Height: 16})
-		measured := strippedLines(m)[3]
+		measured := strippedLines(m)[4]
 
 		landed := m.sizes
 		m.sizes = nil
-		blank := strippedLines(m)[3]
+		blank := strippedLines(m)[4]
 		m.sizes = landed
 
 		if lipgloss.Width(measured) != lipgloss.Width(blank) {
 			t.Fatalf("at width %d the row changed width when sizes landed: %q vs %q", width, blank, measured)
 		}
-		if index := cellIndex(blank, "formula"); index < 0 || index != cellIndex(measured, "formula") {
-			t.Fatalf("at width %d the origin column moved when sizes landed: %q vs %q", width, blank, measured)
+		if index := cellIndex(blank, "Alpha"); index < 0 || index != cellIndex(measured, "Alpha") {
+			t.Fatalf("at width %d the name column moved when sizes landed: %q vs %q", width, blank, measured)
 		}
 		if !strings.Contains(measured, "1MB") {
 			t.Fatalf("at width %d the measured row carries no size: %q", width, measured)
@@ -498,7 +501,7 @@ func TestSizeColumnIsReservedBeforeTheMeasurementLands(t *testing.T) {
 	// Back on the cask list: no size, measured or not.
 	switchTo(t, m)
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 16})
-	if row := strippedLines(m)[3]; strings.ContainsAny(strings.TrimRight(row, " │"), "KMG") {
+	if row := strippedLines(m)[4]; strings.ContainsAny(strings.TrimRight(row, " │"), "KMG") {
 		t.Fatalf("the cask row carries a size: %q", row)
 	}
 }
@@ -512,31 +515,32 @@ func TestRowShapeAndNameColumnBounds(t *testing.T) {
 		want  string
 	}{
 		{
-			// No size column: the Caskroom is not measured, so the cask list
-			// reserves nothing for it and the name column keeps that width.
+			// No size column and no dep column: the Caskroom is not measured and
+			// casks have no dependency relation, so the cask list reserves
+			// nothing beyond the name and the whole width goes to it.
 			name:  "cask row",
 			pkg:   brew.Package{Name: "Alpha", Kind: brew.Cask},
 			width: 40,
-			want:  "    Alpha                          cask ",
+			want:  "    Alpha                               ",
 		},
 		{
-			name:  "on-request formula",
+			name:  "on-request formula keeps the dep slot blank",
 			pkg:   brew.Package{Name: "vault", Kind: brew.Formula},
 			width: 40,
-			want:  "    vault                 formula       ",
+			want:  "    vault                               ",
 		},
 		{
-			name:  "dependency formula carries dep in the origin column",
+			name:  "dependency formula carries dep in its column",
 			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
 			width: 40,
-			want:  "    llvm@22               dep           ",
+			want:  "    llvm@22                   dep       ",
 		},
 		{
 			// 32-column narrow layout with a scrollbar: the tightest supported row.
 			name:  "narrowest supported row keeps the pinned name minimum",
 			pkg:   brew.Package{Name: "llvm@22", Kind: brew.Formula, Dependency: true},
 			width: 29,
-			want:  "    llvm@22    dep           ",
+			want:  "    llvm@22        dep       ",
 		},
 	}
 	for _, tt := range tests {
@@ -671,33 +675,91 @@ func TestScrollbarNeverChangesTheRenderedWidth(t *testing.T) {
 // which no width assertion can see. These indices are written out rather than
 // recomputed from the formula, so the test disagrees with the code when the code
 // changes.
-func TestPackageRowKindColumnLandsAtAFixedCell(t *testing.T) {
+// The dep marker keeps a fixed cell on the formula list whatever the row
+// holds, and no row spells its kind: the active tab already names it.
+func TestDepColumnLandsAtAFixedCellAndKindWordsAreGone(t *testing.T) {
 	m, _ := newTestModel(t)
 	for _, tt := range []struct {
 		name      string
-		pkg       brew.Package
 		width     int
 		wantIndex int
 	}{
-		{"cask at 20", brew.Package{Name: "alpha", Kind: brew.Cask}, 20, 16},
-		{"cask at 32", brew.Package{Name: "alpha", Kind: brew.Cask}, 32, 28},
-		{"cask at 40", brew.Package{Name: "alpha", Kind: brew.Cask}, 40, 35},
-		{"cask at 72", brew.Package{Name: "alpha", Kind: brew.Cask}, 72, 35},
-		{"formula at 32", brew.Package{Name: "alpha", Kind: brew.Formula}, 32, 25},
-		{"formula at 40", brew.Package{Name: "alpha", Kind: brew.Formula}, 40, 33},
-		{"long name at 40", brew.Package{Name: strings.Repeat("x", 60), Kind: brew.Cask}, 40, 35},
+		{"formula at 32", 32, 22},
+		{"formula at 40", 40, 30},
+		{"formula at 72", 72, 35},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			plain := ansiSequence.ReplaceAllString(m.packageLine(tt.pkg, false, tt.width), "")
+			m.kind = brew.Formula
+			pkg := brew.Package{Name: "alpha", Kind: brew.Formula, Dependency: true}
+			plain := ansiSequence.ReplaceAllString(m.packageLine(pkg, false, tt.width), "")
 			if got := lipgloss.Width(plain); got != tt.width {
 				t.Fatalf("row width = %d, want %d: %q", got, tt.width, plain)
 			}
-			kind := string(tt.pkg.Kind)
-			got := cellIndex(plain, kind)
-			if got != tt.wantIndex {
-				t.Fatalf("kind column at cell %d, want %d: %q", got, tt.wantIndex, plain)
+			if got := cellIndex(plain, "dep"); got != tt.wantIndex {
+				t.Fatalf("dep column at cell %d, want %d: %q", got, tt.wantIndex, plain)
 			}
 		})
+	}
+	for _, pkg := range []brew.Package{
+		{Name: "alpha", Kind: brew.Formula},
+		{Name: "alpha", Kind: brew.Cask},
+	} {
+		m.kind = pkg.Kind
+		plain := ansiSequence.ReplaceAllString(m.packageLine(pkg, false, 72), "")
+		if strings.Contains(plain, string(pkg.Kind)) {
+			t.Fatalf("row spells its kind: %q", plain)
+		}
+	}
+}
+
+// The table header sits in the first content row, labels exactly the columns
+// the active list renders, and carries the sort cue on the ordered column.
+func TestListHeaderLabelsColumnsAndCarriesTheSortCue(t *testing.T) {
+	m, _ := newTestModel(t)
+	// 120 columns: wide enough that the version column survives the tail clip,
+	// which is where its heading is expected to appear at all.
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 16})
+	lines := strippedLines(m)
+	header := lines[3]
+	if !strings.Contains(header, "Name \u25b2") || !strings.Contains(header, "Version") {
+		t.Fatalf("cask header=%q, want Name \u25b2 and Version", header)
+	}
+	if strings.Contains(header, "Dep") || strings.Contains(header, "Size") {
+		t.Fatalf("cask header=%q, want no Dep or Size heading", header)
+	}
+	// The header labels the row below it rather than replacing it: the first
+	// package still renders, one row down.
+	if got := lines[4]; !strings.Contains(got, "Alpha") {
+		t.Fatalf("first row=%q, want the first package under the header", got)
+	}
+
+	switchTo(t, m)
+	header = strippedLines(m)[3]
+	for _, want := range []string{"Name \u25b2", "Dep", "Version", "Size"} {
+		if !strings.Contains(header, want) {
+			t.Fatalf("formula header=%q, want %q", header, want)
+		}
+	}
+	if strings.Contains(header, "Size \u25bc") {
+		t.Fatalf("formula header=%q, want no size cue before o is pressed", header)
+	}
+
+	m.Update(textKey("o"))
+	header = strippedLines(m)[3]
+	if !strings.Contains(header, "Size \u25bc") || strings.Contains(header, "\u25b2") {
+		t.Fatalf("size-sorted header=%q, want the cue on Size only", header)
+	}
+	m.Update(textKey("o"))
+	if header := strippedLines(m)[3]; !strings.Contains(header, "Size \u25b2") {
+		t.Fatalf("ascending-size header=%q, want Size \u25b2", header)
+	}
+	m.Update(textKey("o"))
+	if header := strippedLines(m)[3]; !strings.Contains(header, "Name \u25bc") {
+		t.Fatalf("descending-name header=%q, want Name \u25bc", header)
+	}
+	m.Update(textKey("o"))
+	if header := strippedLines(m)[3]; !strings.Contains(header, "Name \u25b2") {
+		t.Fatalf("restored header=%q, want the cue back on Name", header)
 	}
 }
 
@@ -705,15 +767,15 @@ func TestPackageRowKindColumnLandsAtAFixedCell(t *testing.T) {
 // cannot shift the columns of its neighbours.
 func TestOutdatedMarkerDoesNotShiftTheRow(t *testing.T) {
 	m, _ := newTestModel(t)
-	fresh := brew.Package{Name: "alpha", Kind: brew.Cask}
-	stale := brew.Package{Name: "alpha", Kind: brew.Cask, Outdated: true}
+	fresh := brew.Package{Name: "alpha", Version: "1.0", Kind: brew.Cask}
+	stale := brew.Package{Name: "alpha", Version: "1.0", Kind: brew.Cask, Outdated: true}
 
 	plainOf := func(p brew.Package) string {
 		return ansiSequence.ReplaceAllString(m.packageLine(p, false, 40), "")
 	}
 	a, b := plainOf(fresh), plainOf(stale)
-	if cellIndex(a, "cask") != cellIndex(b, "cask") {
-		t.Fatalf("marker moved the kind column:\n fresh %q\n stale %q", a, b)
+	if cellIndex(a, "1.0") != cellIndex(b, "1.0") {
+		t.Fatalf("marker moved the version column:\n fresh %q\n stale %q", a, b)
 	}
 	if lipgloss.Width(a) != lipgloss.Width(b) {
 		t.Fatalf("marker changed the row width: %d vs %d", lipgloss.Width(a), lipgloss.Width(b))

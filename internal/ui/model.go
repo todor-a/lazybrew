@@ -63,11 +63,11 @@ type packageItem struct{ packageValue brew.Package }
 
 func (i packageItem) FilterValue() string {
 	p := i.packageValue
-	// The rendered origin token, not only the kind. A dependency row displays
-	// "dep" and no longer displays "formula", so matching on kind alone would
-	// make the row unreachable by the word on it and reachable by a word that is
-	// not. Both are included: "formula" still finds every formula.
-	return p.Name + " " + p.Version + " " + string(p.Kind) + " " + strings.TrimSpace(originColumn(p))
+	// The rendered tokens only. The kind word is gone from the row — the active
+	// tab already names the kind — so it is gone from the filter too: a search
+	// must not match every row by a word that is on none of them, and "dep"
+	// stays because it is still the word on a dependency row.
+	return p.Name + " " + p.Version + " " + strings.TrimSpace(depColumn(p))
 }
 
 type packageDelegate struct{}
@@ -379,7 +379,7 @@ type model struct {
 	sizesCancel  context.CancelFunc
 	sizesPending bool
 	showDeps     bool
-	sortBySize   bool
+	sortOrders   map[brew.Kind]sortOrder
 
 	status       string
 	priority     bool
@@ -445,6 +445,7 @@ func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, 
 		loadPurpose:   loadStartup,
 		spinnerActive: true,
 		listCache:     make(map[brew.Kind][]brew.Package),
+		sortOrders:    make(map[brew.Kind]sortOrder),
 	}
 	// Seed the session caches from the last run's snapshot so Init can paint
 	// before the first brew call returns. The loads Init starts replace all of
@@ -666,10 +667,15 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		}
 		return cmd
 	case "o", "O":
-		m.sortBySize = !m.sortBySize
+		// Screen-aware: the key cycles the order of the list it is pressed
+		// over and nothing else — flipping shared state from here would
+		// re-order a screen the user is not looking at. Formulae cycle
+		// name ↑ → size ↓ → size ↑ → name ↓; casks, unsized by design (see
+		// brew.Sizes), cycle the two name orders only.
+		m.sortOrders[m.kind] = m.sortOrders[m.kind].next(m.kind)
 		cmd, applied := m.reorder()
 		if applied {
-			m.status, m.priority = sortStatus(m.sortBySize), false
+			m.status, m.priority = m.sortOrders[m.kind].status(), false
 		}
 		return cmd
 	case "r", "R":
@@ -1244,7 +1250,7 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	// it changes nothing that matters - and skipping it there left the request
 	// dropped with no retry, so cancelling the dialog returned to a list in source
 	// order while the status still claimed a size sort.
-	if m.sortBySize && !m.loading && m.mode != modeOperation {
+	if m.sortOrders[m.kind].bySize() && !m.loading && m.mode != modeOperation {
 		if cached, ok := m.listCache[m.kind]; ok {
 			m.setPackages(cached, 0)
 			return m.selectInfo()
@@ -1316,10 +1322,28 @@ func (m *model) setPackages(packages []brew.Package, selection int) {
 		}
 		visible = append(visible, pkg)
 	}
-	if m.sortBySize && m.sizes != nil {
+	switch order := m.sortOrders[m.kind]; {
+	case order == sortNameDesc:
 		slices.SortStableFunc(visible, func(a, b brew.Package) int {
-			aKB, _ := m.sizes.KB(a.Kind, a.Name)
-			bKB, _ := m.sizes.KB(b.Kind, b.Name)
+			return cmp.Compare(b.Name, a.Name)
+		})
+	case order.bySize() && m.sizes != nil:
+		asc := order == sortSizeAsc
+		slices.SortStableFunc(visible, func(a, b brew.Package) int {
+			aKB, aOK := m.sizes.KB(a.Kind, a.Name)
+			bKB, bOK := m.sizes.KB(b.Kind, b.Name)
+			// Unmeasured rows sink to the bottom in both directions: a row
+			// with no number is not "the smallest", it is unknown, and the
+			// ascending order must not lead with blanks.
+			if aOK != bOK {
+				if aOK {
+					return -1
+				}
+				return 1
+			}
+			if asc {
+				return cmp.Compare(aKB, bKB)
+			}
 			return cmp.Compare(bKB, aKB)
 		})
 	}
@@ -1346,11 +1370,56 @@ func dependencyStatus(shown bool) string {
 	return "Dependencies: hidden"
 }
 
-func sortStatus(bySize bool) string {
-	if bySize {
-		return "Sort: size"
+// sortOrder is one screen's row order. The name orders exist on every screen;
+// the size orders exist only where rows carry an honest size, which is the
+// formula list (see brew.Sizes). The zero value is source order — the
+// alphabetical order brew prints — so an untouched screen needs no map entry.
+type sortOrder uint8
+
+const (
+	sortNameAsc sortOrder = iota
+	sortSizeDesc
+	sortSizeAsc
+	sortNameDesc
+)
+
+// next advances one screen's cycle. Size-descending comes directly after the
+// default because "what is eating my disk" is the question this screen exists
+// to answer; the size steps are skipped where no row can carry a size.
+func (o sortOrder) next(kind brew.Kind) sortOrder {
+	if kind != brew.Formula {
+		if o == sortNameAsc {
+			return sortNameDesc
+		}
+		return sortNameAsc
 	}
-	return "Sort: name"
+	switch o {
+	case sortNameAsc:
+		return sortSizeDesc
+	case sortSizeDesc:
+		return sortSizeAsc
+	case sortSizeAsc:
+		return sortNameDesc
+	default:
+		return sortNameAsc
+	}
+}
+
+func (o sortOrder) bySize() bool { return o == sortSizeDesc || o == sortSizeAsc }
+
+// status uses the same ↑/↓ glyphs the table head shows, so the transient
+// message and the persistent cue teach the same vocabulary.
+func (o sortOrder) status() string {
+	switch o {
+	case sortSizeDesc:
+		return "Sort: size ↓"
+	case sortSizeAsc:
+		return "Sort: size ↑"
+	case sortNameDesc:
+		return "Sort: name ↓"
+	default:
+		return "Sort: name ↑"
+	}
 }
 
 func (m *model) reorder() (tea.Cmd, bool) {
@@ -1412,7 +1481,9 @@ func (m *model) resize(width, height int) tea.Cmd {
 		paneWidth = max(0, splitColumn(width)-1)
 	}
 	selection := m.list.Index()
-	m.list.SetSize(paneWidth, m.contentRows)
+	// One row of the content area belongs to the table header, so the paginator
+	// pages by what is actually drawn below it.
+	m.list.SetSize(paneWidth, max(0, m.contentRows-1))
 	m.clampSelection(selection)
 	m.help.SetWidth(max(0, width-2))
 	m.viewport.SetWidth(max(0, width-splitColumn(width)-2))

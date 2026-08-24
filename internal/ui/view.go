@@ -161,19 +161,80 @@ func tabSlots(kind brew.Kind) (apps, formulae string) {
 }
 
 func (m *model) contentLines() []string {
+	// The table header owns the first content row, so the list draws one row
+	// fewer. resize sizes the paginator from the same figure, so the page size
+	// and the rows actually drawn can never disagree.
+	listRows := max(0, m.contentRows-1)
 	if m.width < 72 {
-		return m.listLines(m.width-2, m.contentRows)
+		return append([]string{m.listHeader(m.width - 2)}, m.listLines(m.width-2, listRows)...)
 	}
 	divider := splitColumn(m.width)
 	leftWidth := divider - 1
 	rightWidth := m.width - divider - 2
-	left := m.listLines(leftWidth, m.contentRows)
+	left := append([]string{m.listHeader(leftWidth)}, m.listLines(leftWidth, listRows)...)
 	right := m.infoLines(rightWidth, m.contentRows)
 	lines := make([]string, m.contentRows)
 	for row := range lines {
 		lines[row] = lipgloss.JoinHorizontal(lipgloss.Top, left[row], m.divider(), right[row])
 	}
 	return lines
+}
+
+// listHeader is the one-row table head above the list. It repeats
+// packageLine's cell math — prefix, name, dep, size — so every heading sits
+// exactly over its column, and it is chrome: faint like the borders, so it
+// never competes with the rows it labels. Headings exist only for columns the
+// active list actually renders, which is why the cask list shows neither Dep
+// nor Size.
+//
+// The sort cue is a glyph on the ordered column, not a color, per the
+// monochrome precedent the freshness cell sets: ▲ ascending, ▼ descending, on
+// whichever column `o`'s cycle has ordered. It follows exactly the condition
+// setPackages applies the size sort under (requested by `o` AND sizes have
+// landed AND rows that can carry a size), so the cue can never claim an order
+// the rows on screen do not have.
+func (m *model) listHeader(width int) string {
+	dep := ""
+	sizeWidth := 0
+	if m.kind == brew.Formula {
+		dep = "Dep"
+		if width-5-len(dep)-sizeColumnWidth >= 8 {
+			sizeWidth = sizeColumnWidth
+		}
+	}
+	nameWidth := min(30, max(8, width-5-len(dep)-sizeWidth))
+	order := m.sortOrders[m.kind]
+	sizeSorted := order.bySize() && m.sizes != nil && m.kind == brew.Formula
+	nameLabel := "Name"
+	if !sizeSorted {
+		if order == sortNameDesc {
+			nameLabel += " ▼"
+		} else {
+			nameLabel += " ▲"
+		}
+	}
+	line := "    " + fit(nameLabel, nameWidth)
+	if dep != "" {
+		line += " " + dep
+	}
+	// The version column is the unreserved tail the rows clip from the right,
+	// so in a pane too narrow to show a whole version its heading is omitted
+	// rather than clipped: "Vers" over a four-cell sliver would label noise.
+	if lipgloss.Width(line)+len(" Version") <= width-sizeWidth {
+		line += " Version"
+	}
+	if sizeWidth > 0 {
+		sizeLabel := "Size"
+		if sizeSorted {
+			if order == sortSizeAsc {
+				sizeLabel += " ▲"
+			} else {
+				sizeLabel += " ▼"
+			}
+		}
+		line = fit(line, width-sizeWidth) + " " + padLeft(sizeLabel, sizeWidth-1)
+	}
+	return lipgloss.NewStyle().Faint(true).Render(fit(line, width))
 }
 
 // splitColumn caps the info pane at 46 interior cells. Below 96 columns the
@@ -286,19 +347,22 @@ func (m *model) scrollbarColumn(height, totalPages, page int) []string {
 	return column
 }
 
-// originColumn repurposes the old kind column. In a single-kind list that column
-// was a constant, so carrying `dep` there costs no width and turns a constant
-// into the dependency marker. It is fixed-width per list rather than per row, so
-// the name column cannot shift between rows. Text, not color, per the monochrome
-// precedent the tab bar already sets.
-func originColumn(pkg brew.Package) string {
+// depColumn is the three-cell dependency marker. The kind word that used to
+// share this column is gone: in a single-kind list it was a constant, and the
+// active tab already names the kind for every row, so it carried no
+// information and only cost name-column width. The dep marker is real per-row
+// signal and keeps a fixed-width slot on the formula list — blank when not a
+// dependency — so the version column cannot shift between rows. Text, not
+// color, per the monochrome precedent the tab bar already sets. A cask has no
+// dependency relation, so the cask list drops the column entirely.
+func depColumn(pkg brew.Package) string {
 	if pkg.Kind != brew.Formula {
-		return string(pkg.Kind)
+		return ""
 	}
 	if pkg.Dependency {
-		return "dep    "
+		return "dep"
 	}
-	return "formula"
+	return "   "
 }
 
 // sizeColumnWidth is one space plus six right-aligned cells. It is reserved as
@@ -339,16 +403,19 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if m.operation != nil && m.operation.Kind == pkg.Kind && m.operation.Name == pkg.Name {
 		freshness = m.spinner.View()
 	}
-	origin := originColumn(pkg)
+	dep := depColumn(pkg)
 	// The size column is reserved only where a size can honestly be measured,
 	// which is the formula list. See rowSize.
 	sizeWidth := 0
-	if m.kind == brew.Formula && width-5-lipgloss.Width(origin)-sizeColumnWidth >= 8 {
+	if m.kind == brew.Formula && width-5-lipgloss.Width(dep)-sizeColumnWidth >= 8 {
 		sizeWidth = sizeColumnWidth
 	}
-	nameWidth := min(30, max(8, width-5-lipgloss.Width(origin)-sizeWidth))
+	nameWidth := min(30, max(8, width-5-lipgloss.Width(dep)-sizeWidth))
 	name := fit(pkg.Name, nameWidth)
-	line := " " + marker + freshness + " " + name + " " + origin
+	line := " " + marker + freshness + " " + name
+	if dep != "" {
+		line += " " + dep
+	}
 	if pkg.Version != "" {
 		line += " " + pkg.Version
 		// The offered version renders only on rows Homebrew's verdict marked, so
