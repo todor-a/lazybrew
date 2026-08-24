@@ -1275,46 +1275,54 @@ func TestDependencyToggleOnTheCaskListOnlyReportsStatus(t *testing.T) {
 	}
 }
 
-// The size sort is screen-aware: on the Apps screen the key explains itself
-// without flipping anything - a toggle here would re-order the formula screen
-// behind the user's back - and the Apps footer does not advertise the key.
-func TestSizeSortIsFormulaScreenOnly(t *testing.T) {
+// The sort is screen-aware: `o` cycles the order of the screen it is pressed
+// on. Casks are unsized, so the Apps screen cycles the two name orders and
+// never claims a size order - and it must not touch the formula screen's order.
+func TestSortOnCasksCyclesNameOrderOnly(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.updateNormal(textKey("o"))
-	if m.sortBySize {
-		t.Fatal("sort flag flipped from the cask screen")
+	if m.status != "Sort: name ↓" || m.priority {
+		t.Fatalf("status=%q priority=%v, want Sort: name ↓", m.status, m.priority)
 	}
-	if m.status != "Casks have no sizes to sort" || m.priority {
-		t.Fatalf("status=%q priority=%v, want the unsized-casks explanation", m.status, m.priority)
+	if got := visibleNames(m); !slices.Equal(got, []string{"Gamma", "Beta", "Alpha"}) {
+		t.Fatalf("cask rows=%q, want reverse name order", got)
 	}
-	if footer := m.footerLine(80); strings.Contains(footer, "Sort") {
-		t.Fatalf("cask footer advertises sort: %q", footer)
+	if m.sortOrders[brew.Formula] != sortNameAsc {
+		t.Fatal("cask sort leaked onto the formula screen")
 	}
-	drainList(t, m, m.switchKind())
-	if footer := m.footerLine(80); !strings.Contains(footer, "Sort") {
-		t.Fatalf("formula footer lost sort: %q", footer)
+	m.updateNormal(textKey("o"))
+	if m.status != "Sort: name ↑" {
+		t.Fatalf("status=%q, want Sort: name ↑", m.status)
+	}
+	if got := visibleNames(m); !slices.Equal(got, []string{"Alpha", "Beta", "Gamma"}) {
+		t.Fatalf("cask rows=%q, want source order restored", got)
 	}
 }
 
-func TestSizeSortOrdersLargestFirstAndBackToSourceOrder(t *testing.T) {
+// The formula cycle walks every order and returns to the source order, which
+// doubles as the pin on the cycle's sequence.
+func TestSortCyclesThroughSizeAndNameOrders(t *testing.T) {
 	m, _ := newFleetModel(t)
 	drainList(t, m, m.switchKind())
 	m.updateNormal(textKey("a"))
 
-	m.updateNormal(textKey("o"))
-	if m.status != "Sort: size" || m.priority {
-		t.Fatalf("status=%q priority=%v, want an ordinary Sort: size", m.status, m.priority)
+	steps := []struct {
+		status string
+		rows   []string
+	}{
+		{"Sort: size ↓", []string{"llvm@22", "vault", "gcc", "awscli"}},
+		{"Sort: size ↑", []string{"awscli", "gcc", "vault", "llvm@22"}},
+		{"Sort: name ↓", []string{"vault", "llvm@22", "gcc", "awscli"}},
+		{"Sort: name ↑", []string{"awscli", "gcc", "llvm@22", "vault"}},
 	}
-	if got := visibleNames(m); !slices.Equal(got, []string{"llvm@22", "vault", "gcc", "awscli"}) {
-		t.Fatalf("sorted rows=%q, want largest first", got)
-	}
-
-	m.updateNormal(textKey("O"))
-	if m.status != "Sort: name" {
-		t.Fatalf("status=%q, want Sort: name", m.status)
-	}
-	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "gcc", "llvm@22", "vault"}) {
-		t.Fatalf("unsorted rows=%q, want source order", got)
+	for i, step := range steps {
+		m.updateNormal(textKey("o"))
+		if m.status != step.status || m.priority {
+			t.Fatalf("step %d: status=%q priority=%v, want %q", i, m.status, m.priority, step.status)
+		}
+		if got := visibleNames(m); !slices.Equal(got, step.rows) {
+			t.Fatalf("step %d (%s): rows=%q, want %q", i, step.status, got, step.rows)
+		}
 	}
 }
 
@@ -1340,7 +1348,7 @@ func TestSizeSortAppliesWhenTheMeasurementLandsLate(t *testing.T) {
 	m.sizes = nil
 
 	m.updateNormal(textKey("o"))
-	if !m.sortBySize {
+	if m.sortOrders[m.kind] != sortSizeDesc {
 		t.Fatal("o did not record the requested order")
 	}
 	if got := visibleNames(m); !slices.Equal(got, []string{"awscli", "gcc", "llvm@22", "vault"}) {
@@ -1540,8 +1548,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			if m.query != pressed {
 				t.Fatalf("query=%q, want the key typed as text", m.query)
 			}
-			if m.showDeps || m.sortBySize {
-				t.Fatalf("search mode applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("search mode applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
 			}
 		})
 
@@ -1552,8 +1560,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			if m.mode != modeNormal || m.status != "Uninstall cancelled" {
 				t.Fatalf("mode=%v status=%q, want a cancelled confirmation", m.mode, m.status)
 			}
-			if m.showDeps || m.sortBySize {
-				t.Fatalf("confirmation applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("confirmation applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
 			}
 		})
 
@@ -1562,8 +1570,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			m.loading = true
 			m.loadPurpose = loadRefresh
 			m.Update(textKey(pressed))
-			if m.showDeps || m.sortBySize {
-				t.Fatalf("a loading list applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("a loading list applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
 			}
 		})
 
@@ -1571,8 +1579,8 @@ func TestNewKeysAreInertOutsideNormalMode(t *testing.T) {
 			m, _ := newFleetModel(t)
 			m.mode = modeQuitting
 			m.Update(textKey(pressed))
-			if m.showDeps || m.sortBySize {
-				t.Fatalf("quitting applied the key: deps=%v sort=%v", m.showDeps, m.sortBySize)
+			if m.showDeps || m.sortOrders[m.kind] != sortNameAsc {
+				t.Fatalf("quitting applied the key: deps=%v sort=%v", m.showDeps, m.sortOrders[m.kind])
 			}
 		})
 	}
@@ -1646,7 +1654,7 @@ func TestASizeSortRequestSurvivesAConfirmationDialog(t *testing.T) {
 	landed := *m.sizes
 	m.sizes = nil
 	m.Update(textKey("o"))
-	if !m.sortBySize {
+	if m.sortOrders[m.kind] != sortSizeDesc {
 		t.Fatal("o did not request a size sort")
 	}
 
@@ -1690,7 +1698,7 @@ func TestAToggleWithNoRetainedListKeepsTheExistingStatus(t *testing.T) {
 	if m.status != "brew exploded" {
 		t.Fatalf("status=%q, want the existing error preserved", m.status)
 	}
-	if !m.sortBySize {
+	if m.sortOrders[m.kind] != sortSizeDesc {
 		t.Fatal("the preference should still be recorded for the next load")
 	}
 }

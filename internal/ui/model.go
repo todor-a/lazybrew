@@ -379,7 +379,7 @@ type model struct {
 	sizesCancel  context.CancelFunc
 	sizesPending bool
 	showDeps     bool
-	sortBySize   bool
+	sortOrders   map[brew.Kind]sortOrder
 
 	status       string
 	priority     bool
@@ -445,6 +445,7 @@ func New(homebrew brew.Homebrew, loader *info.Loader, runner privileged.Runner, 
 		loadPurpose:   loadStartup,
 		spinnerActive: true,
 		listCache:     make(map[brew.Kind][]brew.Package),
+		sortOrders:    make(map[brew.Kind]sortOrder),
 	}
 	// Seed the session caches from the last run's snapshot so Init can paint
 	// before the first brew call returns. The loads Init starts replace all of
@@ -666,20 +667,15 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		}
 		return cmd
 	case "o", "O":
-		// Screen-aware, unlike `a`: this key acts on the list it is pressed
-		// over. Casks are unsized by design (see brew.Sizes), so on the Apps
-		// screen there is no order to toggle, and flipping the formula flag
-		// from here would re-order a screen the user is not looking at. The
-		// key still answers with the reason, and the Apps footer does not
-		// advertise it at all.
-		if m.kind != brew.Formula {
-			m.status, m.priority = "Casks have no sizes to sort", false
-			return nil
-		}
-		m.sortBySize = !m.sortBySize
+		// Screen-aware: the key cycles the order of the list it is pressed
+		// over and nothing else — flipping shared state from here would
+		// re-order a screen the user is not looking at. Formulae cycle
+		// name ↑ → size ↓ → size ↑ → name ↓; casks, unsized by design (see
+		// brew.Sizes), cycle the two name orders only.
+		m.sortOrders[m.kind] = m.sortOrders[m.kind].next(m.kind)
 		cmd, applied := m.reorder()
 		if applied {
-			m.status, m.priority = sortStatus(m.sortBySize), false
+			m.status, m.priority = m.sortOrders[m.kind].status(), false
 		}
 		return cmd
 	case "r", "R":
@@ -1224,7 +1220,7 @@ func (m *model) handleSizesResult(msg sizesResultMsg) tea.Cmd {
 	// it changes nothing that matters - and skipping it there left the request
 	// dropped with no retry, so cancelling the dialog returned to a list in source
 	// order while the status still claimed a size sort.
-	if m.sortBySize && !m.loading && m.mode != modeOperation {
+	if m.sortOrders[m.kind].bySize() && !m.loading && m.mode != modeOperation {
 		if cached, ok := m.listCache[m.kind]; ok {
 			m.setPackages(cached, 0)
 			return m.selectInfo()
@@ -1296,10 +1292,28 @@ func (m *model) setPackages(packages []brew.Package, selection int) {
 		}
 		visible = append(visible, pkg)
 	}
-	if m.sortBySize && m.sizes != nil {
+	switch order := m.sortOrders[m.kind]; {
+	case order == sortNameDesc:
 		slices.SortStableFunc(visible, func(a, b brew.Package) int {
-			aKB, _ := m.sizes.KB(a.Kind, a.Name)
-			bKB, _ := m.sizes.KB(b.Kind, b.Name)
+			return cmp.Compare(b.Name, a.Name)
+		})
+	case order.bySize() && m.sizes != nil:
+		asc := order == sortSizeAsc
+		slices.SortStableFunc(visible, func(a, b brew.Package) int {
+			aKB, aOK := m.sizes.KB(a.Kind, a.Name)
+			bKB, bOK := m.sizes.KB(b.Kind, b.Name)
+			// Unmeasured rows sink to the bottom in both directions: a row
+			// with no number is not "the smallest", it is unknown, and the
+			// ascending order must not lead with blanks.
+			if aOK != bOK {
+				if aOK {
+					return -1
+				}
+				return 1
+			}
+			if asc {
+				return cmp.Compare(aKB, bKB)
+			}
 			return cmp.Compare(bKB, aKB)
 		})
 	}
@@ -1326,11 +1340,56 @@ func dependencyStatus(shown bool) string {
 	return "Dependencies: hidden"
 }
 
-func sortStatus(bySize bool) string {
-	if bySize {
-		return "Sort: size"
+// sortOrder is one screen's row order. The name orders exist on every screen;
+// the size orders exist only where rows carry an honest size, which is the
+// formula list (see brew.Sizes). The zero value is source order — the
+// alphabetical order brew prints — so an untouched screen needs no map entry.
+type sortOrder uint8
+
+const (
+	sortNameAsc sortOrder = iota
+	sortSizeDesc
+	sortSizeAsc
+	sortNameDesc
+)
+
+// next advances one screen's cycle. Size-descending comes directly after the
+// default because "what is eating my disk" is the question this screen exists
+// to answer; the size steps are skipped where no row can carry a size.
+func (o sortOrder) next(kind brew.Kind) sortOrder {
+	if kind != brew.Formula {
+		if o == sortNameAsc {
+			return sortNameDesc
+		}
+		return sortNameAsc
 	}
-	return "Sort: name"
+	switch o {
+	case sortNameAsc:
+		return sortSizeDesc
+	case sortSizeDesc:
+		return sortSizeAsc
+	case sortSizeAsc:
+		return sortNameDesc
+	default:
+		return sortNameAsc
+	}
+}
+
+func (o sortOrder) bySize() bool { return o == sortSizeDesc || o == sortSizeAsc }
+
+// status uses the same ↑/↓ glyphs the table head shows, so the transient
+// message and the persistent cue teach the same vocabulary.
+func (o sortOrder) status() string {
+	switch o {
+	case sortSizeDesc:
+		return "Sort: size ↓"
+	case sortSizeAsc:
+		return "Sort: size ↑"
+	case sortNameDesc:
+		return "Sort: name ↓"
+	default:
+		return "Sort: name ↑"
+	}
 }
 
 func (m *model) reorder() (tea.Cmd, bool) {

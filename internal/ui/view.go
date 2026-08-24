@@ -188,8 +188,8 @@ func (m *model) contentLines() []string {
 // nor Size.
 //
 // The sort cue is a glyph on the ordered column, not a color, per the
-// monochrome precedent the freshness cell sets: ▲ for the ascending name
-// order, ▼ for the descending size order. It follows exactly the condition
+// monochrome precedent the freshness cell sets: ▲ ascending, ▼ descending, on
+// whichever column `o`'s cycle has ordered. It follows exactly the condition
 // setPackages applies the size sort under (requested by `o` AND sizes have
 // landed AND rows that can carry a size), so the cue can never claim an order
 // the rows on screen do not have.
@@ -203,10 +203,15 @@ func (m *model) listHeader(width int) string {
 		}
 	}
 	nameWidth := min(30, max(8, width-5-len(dep)-sizeWidth))
-	sizeSorted := m.sortBySize && m.sizes != nil && m.kind == brew.Formula
+	order := m.sortOrders[m.kind]
+	sizeSorted := order.bySize() && m.sizes != nil && m.kind == brew.Formula
 	nameLabel := "Name"
 	if !sizeSorted {
-		nameLabel += " ▲"
+		if order == sortNameDesc {
+			nameLabel += " ▼"
+		} else {
+			nameLabel += " ▲"
+		}
 	}
 	line := "    " + fit(nameLabel, nameWidth)
 	if dep != "" {
@@ -221,7 +226,11 @@ func (m *model) listHeader(width int) string {
 	if sizeWidth > 0 {
 		sizeLabel := "Size"
 		if sizeSorted {
-			sizeLabel += " ▼"
+			if order == sortSizeAsc {
+				sizeLabel += " ▲"
+			} else {
+				sizeLabel += " ▼"
+			}
 		}
 		line = fit(line, width-sizeWidth) + " " + padLeft(sizeLabel, sizeWidth-1)
 	}
@@ -499,7 +508,7 @@ func kindPlural(kind brew.Kind) string {
 }
 
 func (m *model) footerLine(width int) string {
-	keys := helpFor(m.kind)
+	keys := normalHelp
 	switch {
 	case m.mode == modeQuitting:
 		keys = cleanupHelp
@@ -512,7 +521,7 @@ func (m *model) footerLine(width int) string {
 	case m.mode == modePassword:
 		keys = progressHelp(m.verb)
 	case m.mode == modeOperation:
-		keys = operationHelp(m.verb, m.kind)
+		keys = operationHelp(m.verb)
 	}
 	// Two-tone, and every segment carries the full footer role rather than relying
 	// on an enclosing style. A single outer Render over pre-styled segments would

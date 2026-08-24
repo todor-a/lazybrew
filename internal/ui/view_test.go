@@ -457,20 +457,11 @@ func TestOutdatedGlyphIsOneCell(t *testing.T) {
 func TestFooterListsEveryNormalKey(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
-	// The cask screen teaches every key except the size sort, which is
-	// screen-aware and absent where it cannot act.
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Theme: t · Refresh: r · Quit: q"
+	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Sort: o · Theme: t · Refresh: r · Quit: q"
 	if footer != want {
-		t.Fatalf("cask footer=%q, want %q", footer, want)
-	}
-	drainList(t, m, m.switchKind())
-	lines = strippedLines(m)
-	footer = strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want = "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Sort: o · Theme: t · Refresh: r · Quit: q"
-	if footer != want {
-		t.Fatalf("formula footer=%q, want %q", footer, want)
+		t.Fatalf("footer=%q, want %q", footer, want)
 	}
 }
 
@@ -757,6 +748,14 @@ func TestListHeaderLabelsColumnsAndCarriesTheSortCue(t *testing.T) {
 	header = strippedLines(m)[3]
 	if !strings.Contains(header, "Size \u25bc") || strings.Contains(header, "\u25b2") {
 		t.Fatalf("size-sorted header=%q, want the cue on Size only", header)
+	}
+	m.Update(textKey("o"))
+	if header := strippedLines(m)[3]; !strings.Contains(header, "Size \u25b2") {
+		t.Fatalf("ascending-size header=%q, want Size \u25b2", header)
+	}
+	m.Update(textKey("o"))
+	if header := strippedLines(m)[3]; !strings.Contains(header, "Name \u25bc") {
+		t.Fatalf("descending-name header=%q, want Name \u25bc", header)
 	}
 	m.Update(textKey("o"))
 	if header := strippedLines(m)[3]; !strings.Contains(header, "Name \u25b2") {
