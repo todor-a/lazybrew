@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	"lazybrew/internal/brew"
@@ -95,4 +96,52 @@ func toggleQualifier(query, token string) (string, bool) {
 		return strings.Join(kept, " "), false
 	}
 	return strings.Join(append([]string{token}, kept...), " "), true
+}
+
+// qualifierVocabulary is every completable is: name: the qualifier table plus
+// dep, which parseQuery special-cases. Derived, never hand-listed, so a new
+// qualifier lights up completion by existing. Sorted, so the hint is
+// deterministic.
+func qualifierVocabulary() []string {
+	names := make([]string, 0, len(qualifiers)+1)
+	for name := range qualifiers {
+		names = append(names, name)
+	}
+	names = append(names, "dep")
+	slices.Sort(names)
+	return names
+}
+
+// completeQualifier reports the full is: token tab would write for the
+// query's last token: the sorted-first vocabulary name the incomplete is:
+// prefix starts (case-insensitively; a bare "is:" starts everything). Empty
+// when the last token is not an is: prefix, is already finished by a trailing
+// space, already names a qualifier, or matches nothing - exactly the moments
+// tab must keep meaning switch-kind. Unknown prefixes therefore fail open
+// twice: no hint here, and parseQuery keeps the typo narrowing as text.
+// ponytail: first match only; cycling matches on repeated tab is the upgrade
+// if the vocabulary outgrows one-hint disambiguation.
+func completeQualifier(query string) string {
+	if strings.HasSuffix(query, " ") {
+		return ""
+	}
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return ""
+	}
+	prefix, ok := strings.CutPrefix(strings.ToLower(fields[len(fields)-1]), "is:")
+	if !ok {
+		return ""
+	}
+	for _, name := range qualifierVocabulary() {
+		// Sorted order puts an exact name before any longer sibling, so a
+		// finished token yields no hint rather than a surprise extension.
+		if name == prefix {
+			return ""
+		}
+		if strings.HasPrefix(name, prefix) {
+			return "is:" + name
+		}
+	}
+	return ""
 }

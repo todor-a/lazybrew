@@ -71,3 +71,37 @@ func TestToggleQualifierRoundTrip(t *testing.T) {
 		t.Fatalf("case-folded removal: query=%q", query)
 	}
 }
+
+func TestCompleteQualifier(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{"unique prefix", "is:unt", "is:untrusted"},
+		{"case-insensitive prefix", "is:UNT", "is:untrusted"},
+		{"bare is: offers the sorted-first name", "is:", "is:dep"},
+		{"only the last token completes", "zed is:o", "is:outdated"},
+		{"earlier tokens do not", "is:o zed", ""},
+		{"complete qualifier keeps tab a kind switch", "is:outdated", ""},
+		{"no match fails open", "is:zzz", ""},
+		{"plain text is not a prefix", "unt", ""},
+		{"a trailing space finishes the token", "is:unt ", ""},
+		{"empty query", "", ""},
+	}
+	for _, c := range cases {
+		if got := completeQualifier(c.query); got != c.want {
+			t.Fatalf("%s: completeQualifier(%q)=%q, want %q", c.name, c.query, got, c.want)
+		}
+	}
+}
+
+// The vocabulary is derived from the qualifier table, so a new entry lights
+// up completion without any other change.
+func TestCompletionVocabularyFollowsTheQualifierTable(t *testing.T) {
+	qualifiers["zonly"] = func(brew.Package) bool { return false }
+	defer delete(qualifiers, "zonly")
+	if got := completeQualifier("is:zon"); got != "is:zonly" {
+		t.Fatalf("completeQualifier(is:zon)=%q, want the table-driven is:zonly", got)
+	}
+}

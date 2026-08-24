@@ -51,7 +51,7 @@ Upgrade or remove lazybrew itself with `brew upgrade --cask lazybrew` / `brew un
 
 While an action runs you can keep browsing, and `d`/`u` on other rows queues them.
 
-In search: type to filter, `Enter` keeps the query, `Esc` clears it, `Tab` switches kind with the query intact.
+In search: type to filter, `Enter` keeps the query, `Esc` clears it, `Tab` completes a partial `is:` filter (the status row shows the completion) and otherwise switches kind with the query intact.
 
 ## Safety
 
