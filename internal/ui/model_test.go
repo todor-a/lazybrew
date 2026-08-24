@@ -415,6 +415,46 @@ func startFakeUninstall(t *testing.T, m *model, uninstaller *fakeUninstaller) {
 	}
 }
 
+// The job window is browse-only: cursor, info selection, and the pure toggles
+// stay live while every key that could mutate, reload, quit, or leave
+// modeOperation is dead, and the acted-upon row carries the spinner mark.
+func TestJobWindowAllowsBrowsingAndBlocksMutation(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	startFakeUninstall(t, m, uninstaller)
+
+	_, infoCommand := m.Update(textKey("j"))
+	if m.list.Index() != 1 || infoCommand == nil {
+		t.Fatalf("browsing dead during job: index=%d info=%v", m.list.Index(), infoCommand != nil)
+	}
+	m.Update(textKey("t"))
+	if m.themeIndex != 1 {
+		t.Fatal("theme cycle dead during job")
+	}
+
+	for _, key := range []tea.KeyPressMsg{textKey("d"), textKey("u"), textKey("r"), textKey("tab"), textKey("/"), textKey("s"), textKey("q")} {
+		m.Update(key)
+	}
+	if m.mode != modeOperation || m.confirmation != nil || m.loading || m.kind != brew.Cask || uninstaller.starts != 1 {
+		t.Fatalf("mutating key escaped the job window: mode=%v confirmation=%v loading=%v kind=%v starts=%d",
+			m.mode, m.confirmation != nil, m.loading, m.kind, uninstaller.starts)
+	}
+
+	lines := strippedLines(m)
+	if !strings.Contains(lines[m.height-2], "Uninstall in progress; browse only") || !strings.Contains(lines[m.height-2], "Theme: t") {
+		t.Fatalf("job footer=%q", lines[m.height-2])
+	}
+
+	target := m.packageLine(*m.operation, false, 60)
+	if !strings.Contains(target, m.spinner.View()) {
+		t.Fatalf("acted-upon row %q missing spinner %q", target, m.spinner.View())
+	}
+	other := m.packageLine(brew.Package{Name: "Beta", Version: "2.0", Kind: brew.Cask}, false, 60)
+	if strings.Contains(other, m.spinner.View()) {
+		t.Fatalf("unrelated row %q carries the operation mark", other)
+	}
+	uninstaller.job.Cancel()
+}
+
 func TestUninstallStartAndTerminalFailuresRestoreControls(t *testing.T) {
 	t.Run("start", func(t *testing.T) {
 		m, uninstaller := newTestModel(t)

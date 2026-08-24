@@ -46,6 +46,21 @@ var (
 	}
 )
 
+// operationHelp is the job-window footer: the running verb plus the browsing
+// keys that stay live while it runs. Navigation is not listed - normalHelp
+// never lists it either - so the row teaches only what the window changes.
+func operationHelp(op brew.Operation) footerKeys {
+	return footerKeys{
+		key.NewBinding(
+			key.WithKeys("__operation_help__"),
+			key.WithHelp(words(op).title+" in progress;", "browse only"),
+		),
+		key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("All:", "a")),
+		key.NewBinding(key.WithKeys("o", "O"), key.WithHelp("Sort:", "o")),
+		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("Theme:", "t")),
+	}
+}
+
 // progressHelp names the verb actually running. A frozen-controls footer that
 // says the wrong verb is worse than one that says none, and the operation is
 // already carried immutably beside the confirmation snapshot.
