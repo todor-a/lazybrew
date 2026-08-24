@@ -1079,8 +1079,9 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			listErr       error
 			outdated      []brew.OutdatedPackage
 			outdatedKnown bool
+			untrusted     []string
 		)
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
 			packages, listErr = homebrew.List(ctx, kind)
@@ -1094,13 +1095,22 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 				outdated, outdatedKnown = rows, true
 			}
 		}()
+		go func() {
+			defer wg.Done()
+			// Absorbed exactly like a failed outdated read, and this is also the
+			// path a Homebrew without `brew trust` takes: the list still loads and
+			// simply carries no trust marks.
+			if names, err := homebrew.Untrusted(ctx, kind); err == nil {
+				untrusted = names
+			}
+		}()
 		wg.Wait()
 		close(done)
 		return listResultMsg{
 			id:       id,
 			kind:     kind,
 			purpose:  purpose,
-			packages: markOutdated(packages, outdated, outdatedKnown),
+			packages: markUntrusted(markOutdated(packages, outdated, outdatedKnown), untrusted),
 			err:      listErr,
 			done:     done,
 		}
@@ -1138,6 +1148,26 @@ func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, know
 		packages[i].LatestVersion = row.Latest
 		if packages[i].Version == "" {
 			packages[i].Version = row.Installed
+		}
+	}
+	return packages
+}
+
+// markUntrusted stamps brew's trust verdict onto the inventory rows it names,
+// matched by name against the rows exactly as markOutdated is. No Known twin:
+// nothing anywhere renders an assurance of trust, so absence of evidence
+// already renders as absence of the mark.
+func markUntrusted(packages []brew.Package, names []string) []brew.Package {
+	if len(names) == 0 {
+		return packages
+	}
+	untrusted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		untrusted[name] = struct{}{}
+	}
+	for i := range packages {
+		if _, ok := untrusted[packages[i].Name]; ok {
+			packages[i].Untrusted = true
 		}
 	}
 	return packages

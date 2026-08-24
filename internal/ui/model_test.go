@@ -20,6 +20,8 @@ type fakeHomebrew struct {
 	packages     map[brew.Kind][]brew.Package
 	outdated     map[brew.Kind][]brew.OutdatedPackage
 	outdatedErr  error
+	untrusted    map[brew.Kind][]string
+	untrustedErr error
 	err          error
 	listStarted  chan struct{}
 	listCalls    map[brew.Kind]int
@@ -71,6 +73,13 @@ func (f *fakeHomebrew) Outdated(_ context.Context, kind brew.Kind) ([]brew.Outda
 		return nil, f.outdatedErr
 	}
 	return append([]brew.OutdatedPackage(nil), f.outdated[kind]...), nil
+}
+
+func (f *fakeHomebrew) Untrusted(_ context.Context, kind brew.Kind) ([]string, error) {
+	if f.untrustedErr != nil {
+		return nil, f.untrustedErr
+	}
+	return append([]string(nil), f.untrusted[kind]...), nil
 }
 
 func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
@@ -1752,5 +1761,55 @@ func TestBothVerbsShareTheConfirmationPathAndCarryTheirOwnWords(t *testing.T) {
 				t.Fatalf("progress footer=%q, want the running verb named", got)
 			}
 		})
+	}
+}
+
+// Untrusted marks land on the rows the same way outdated marks do.
+func TestUntrustedMarksLandOnRows(t *testing.T) {
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {
+				{Name: "Alpha", Version: "1.0", Kind: brew.Cask},
+				{Name: "Beta", Version: "2.0", Kind: brew.Cask},
+			},
+		},
+		// "ghost" is a name the inventory never shows; harmless here, exactly as
+		// an outdated name for a dependency-only formula is.
+		untrusted: map[brew.Kind][]string{brew.Cask: {"Beta", "ghost"}},
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	var got []bool
+	for _, item := range m.list.Items() {
+		got = append(got, item.(packageItem).packageValue.Untrusted)
+	}
+	if !slices.Equal(got, []bool{false, true}) {
+		t.Fatalf("untrusted marks=%v, want only Beta marked", got)
+	}
+}
+
+// A failed trust read — which is also what a Homebrew without `brew trust`
+// produces — still loads an unmarked list.
+func TestAFailedUntrustedReadStillLoadsAnUnmarkedList(t *testing.T) {
+	homebrew := &fakeHomebrew{
+		packages: map[brew.Kind][]brew.Package{
+			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
+		},
+		untrusted:    map[brew.Kind][]string{brew.Cask: {"Alpha"}},
+		untrustedErr: errors.New("Unknown command: trust"),
+	}
+	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
+	m := root.(*model)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	drainList(t, m, m.Init())
+
+	if m.loading || m.status != "" {
+		t.Fatalf("a failed trust read broke the load: loading=%v status=%q", m.loading, m.status)
+	}
+	if m.list.Items()[0].(packageItem).packageValue.Untrusted {
+		t.Fatal("a failed trust read produced a mark")
 	}
 }

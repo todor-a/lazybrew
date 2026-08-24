@@ -811,3 +811,24 @@ func TestFooterKeepsItsBackgroundAcrossTheWholeRow(t *testing.T) {
 		t.Fatalf("footer padding lost the theme background: %q", row)
 	}
 }
+
+// An untrusted package claims the freshness cell and wins it over outdated:
+// brew refuses to load its definition at all, so the refusal explains every
+// other failure on the row and is the state to clear first.
+func TestUntrustedRowClaimsTheFreshnessCell(t *testing.T) {
+	m, _ := newTestModel(t)
+	plain := func(pkg brew.Package, selected bool) string {
+		return ansiSequence.ReplaceAllString(m.packageLine(pkg, selected, 40), "")
+	}
+	marked := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Untrusted: true}, true)
+	if !strings.HasPrefix(marked, " >! Alpha") {
+		t.Fatalf("untrusted row=%q, want a marker then the ! cell", marked)
+	}
+	both := plain(brew.Package{Name: "Alpha", Version: "1.0", Kind: brew.Cask, Outdated: true, Untrusted: true}, false)
+	if !strings.HasPrefix(both, "  ! Alpha") {
+		t.Fatalf("outdated+untrusted row=%q, want the ! cell to win", both)
+	}
+	if lipgloss.Width(marked) != 40 {
+		t.Fatalf("row width=%d, want 40", lipgloss.Width(marked))
+	}
+}

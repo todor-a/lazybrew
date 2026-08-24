@@ -321,11 +321,21 @@ func (m *model) packageLine(pkg brew.Package, selected bool, width int) string {
 	if pkg.Outdated {
 		freshness = "\u2191"
 	}
+	// Untrusted claims the same cell, and wins it: brew refuses to even load
+	// such a package's definition, so the refusal explains every other failure
+	// on the row (info, upgrade) and is the state the user must clear first,
+	// with brew's own info-pane error spelling out the `brew trust` remedy.
+	// ponytail: one shared cell, so a row both outdated and untrusted shows
+	// only "!" while the info pane's version row still says outdated; a second
+	// fixed cell is the upgrade if both cues must coexist.
+	if pkg.Untrusted {
+		freshness = "!"
+	}
 	// The acted-upon row carries the operation's spinner in the freshness cell
 	// for as long as the job runs, so a user browsing elsewhere still sees which
 	// row the verb is acting on. The cell is reused rather than added: the mark
-	// displaces the outdated arrow on that one row only, and the layout cannot
-	// shift when the job ends.
+	// displaces the outdated arrow — and the untrusted mark — on that one row
+	// only, and the layout cannot shift when the job ends.
 	if m.operation != nil && m.operation.Kind == pkg.Kind && m.operation.Name == pkg.Name {
 		freshness = m.spinner.View()
 	}

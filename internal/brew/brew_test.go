@@ -346,3 +346,56 @@ func TestInvalidKindStartsNoCommand(t *testing.T) {
 		t.Fatalf("invalid kind started brew; marker error = %v", err)
 	}
 }
+
+func TestUntrustedCommandVectorsAndFiltering(t *testing.T) {
+	trustJSON := `{"taps":["trusted/tap"],"formulae":["solo/tap/blessed"],"casks":["solo/tap/blessed"],"commands":[]}`
+	// One bare official spelling, one markable tap package, one whose whole tap
+	// is trusted, and one trusted individually.
+	inventory := "bare\nother/tap/marked\ntrusted/tap/skipped\nsolo/tap/blessed\n"
+	tests := []struct {
+		name string
+		kind Kind
+		flag string
+	}{
+		{name: "formula", kind: Formula, flag: "--formula"},
+		{name: "cask", kind: Cask, flag: "--cask"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			argsFile := configureFakeBrew(t, trustJSON+"\n", "", 0, false)
+			fakeBrewStdoutByArg(t, map[string]string{"--full-name": inventory})
+			names, err := New().Untrusted(context.Background(), tt.kind)
+			if err != nil {
+				t.Fatalf("Untrusted() error = %v", err)
+			}
+			if want := []string{"marked"}; !slices.Equal(names, want) {
+				t.Fatalf("Untrusted() = %#v, want %#v", names, want)
+			}
+			// Any order: the inventory and trust store reads are concurrent.
+			assertRecordedArgsAnyOrder(t, argsFile,
+				[]string{"list", tt.flag, "--full-name"},
+				[]string{"trust", "--json", "v1"})
+		})
+	}
+}
+
+func TestUntrustedFailsWhenTheTrustStoreReadFails(t *testing.T) {
+	// The exact shape a Homebrew too old for `brew trust` produces. The caller
+	// absorbs this; the method itself must report it rather than return an empty
+	// verdict as if the store had been read.
+	configureFakeBrew(t, "bare\n", "", 0, false)
+	fakeBrewFailByArg(t, "--json", "Error: Unknown command: trust")
+	if _, err := New().Untrusted(context.Background(), Formula); err == nil {
+		t.Fatal("Untrusted() ignored a failed trust store read")
+	}
+}
+
+func TestUntrustedRefusesAnInvalidKindWithoutStartingBrew(t *testing.T) {
+	argsFile := configureFakeBrew(t, "must not run", "", 0, false)
+	if _, err := New().Untrusted(context.Background(), Kind("other")); err == nil {
+		t.Error("Untrusted() accepted invalid kind")
+	}
+	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid kind started brew; marker error = %v", err)
+	}
+}
