@@ -680,9 +680,13 @@ func (m *model) confirmationModal(pkg brew.Package) string {
 }
 
 func (m *model) confirmationModalFor(op brew.Operation, pkg brew.Package) string {
+	body := words(op).title + " " + pkg.Name + "?"
+	if isSelfUninstall(op, pkg) {
+		body = "This removes lazybrew itself; the app will exit when done"
+	}
 	lines := []string{
 		m.roleStyle(m.currentTheme().header).Render(confirmTitle(op)),
-		words(op).title + " " + pkg.Name + "?",
+		body,
 		m.roleStyle(m.currentTheme().footer).Render("y: confirm  other: cancel"),
 	}
 	return m.modalStyle().Render(strings.Join(lines, "\n"))

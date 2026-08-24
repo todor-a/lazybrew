@@ -737,6 +737,22 @@ func TestUninstallSuccessWaitsForReloadAndKeepsTargetSnapshot(t *testing.T) {
 	}
 }
 
+func TestSelfUninstallSuccessQuitsWithoutReload(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	m.setPackages([]brew.Package{{Name: "lazybrew", Kind: brew.Cask}}, 0)
+	before := m.homebrew.(*fakeHomebrew).listCalls[brew.Cask]
+	startFakeUninstall(t, m, uninstaller)
+
+	uninstaller.job.finish(privileged.Result{})
+	_, command := m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+
+	requireQuit(t, command)
+	requireQuittingState(t, m)
+	if got := m.homebrew.(*fakeHomebrew).listCalls[brew.Cask]; got != before {
+		t.Fatalf("list calls=%d, want %d; self-uninstall must not reload", got, before)
+	}
+}
+
 func TestQuitCancelsActiveAndPendingInfoBeforeCompletingResult(t *testing.T) {
 	started := make(chan string, 2)
 	loader := info.New(func(ctx context.Context, pkg brew.Package) (string, error) {

@@ -95,6 +95,17 @@ func TestConfirmationAndPasswordAreCenteredLayersOverBase(t *testing.T) {
 	}
 }
 
+func TestSelfUninstallConfirmationNamesExit(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.setPackages([]brew.Package{{Name: "lazybrew", Kind: brew.Cask}}, 0)
+	m.Update(textKey("d"))
+
+	confirmation := strings.Join(strippedLines(m), "\n")
+	if !strings.Contains(confirmation, "This removes lazybrew itself; the app will exit when done") {
+		t.Fatalf("self-uninstall confirmation did not name the exit\n%s", confirmation)
+	}
+}
+
 func TestThemeCycleAndRoleTable(t *testing.T) {
 	m, _ := newTestModel(t)
 	want := []string{"Lazygit", "Bright", "Ocean", "Dracula", "Lazygit"}
