@@ -112,6 +112,16 @@ type fakeJob struct {
 	mu          sync.Mutex
 	passwords   [][]byte
 	passwordIDs []uninstall.RequestID
+	terminal    *uninstall.Result
+}
+
+// setTerminal programs the result this job terminates with, including when it is
+// cancelled. A real job asked to stop during cleanup still reports whatever
+// actually happened, so a cancel does not overwrite a programmed terminal result.
+func (j *fakeJob) setTerminal(result uninstall.Result) {
+	j.mu.Lock()
+	j.terminal = &result
+	j.mu.Unlock()
 }
 
 func newFakeJob() *fakeJob {
@@ -133,8 +143,17 @@ func (j *fakeJob) RespondPassword(id uninstall.RequestID, password []byte) error
 	return nil
 }
 func (j *fakeJob) CancelPassword(uninstall.RequestID) error { return nil }
-func (j *fakeJob) Cancel()                                  { j.finish(uninstall.Result{Cancelled: true}) }
-func (j *fakeJob) Wait() uninstall.Result                   { return <-j.result }
+func (j *fakeJob) Cancel() {
+	j.mu.Lock()
+	programmed := j.terminal
+	j.mu.Unlock()
+	if programmed != nil {
+		j.finish(*programmed)
+		return
+	}
+	j.finish(uninstall.Result{Cancelled: true})
+}
+func (j *fakeJob) Wait() uninstall.Result { return <-j.result }
 func (j *fakeJob) finish(result uninstall.Result) {
 	j.once.Do(func() {
 		j.result <- result
@@ -767,10 +786,17 @@ func TestFatalCleanupAndSignalsSetSupervisedExitCodes(t *testing.T) {
 	t.Run("fatal cleanup while quitting", func(t *testing.T) {
 		m, uninstaller := newTestModel(t)
 		startFakeUninstall(t, m, uninstaller)
+		result := uninstall.Result{CleanupErr: errors.New("fatal uninstall cleanup failure: workers remain")}
+		// Programmed before the signal. Quitting cancels the job, and the waiter
+		// goroutine records whatever the job terminated with; if that were a bare
+		// Cancelled result it would take the once-only recording slot and the fatal
+		// cleanup error below would be silently dropped, leaving the signal's exit
+		// code in place. Both paths must see the one true terminal result, exactly
+		// as they do in production.
+		uninstaller.job.setTerminal(result)
 		if _, quit := m.Update(SignalMsg{ExitCode: 143}); quit != nil {
 			t.Fatal("quit returned before fatal typed job result")
 		}
-		result := uninstall.Result{CleanupErr: errors.New("fatal uninstall cleanup failure: workers remain")}
 		uninstaller.job.finish(result)
 		_, quit := m.Update(jobResultMsg{id: m.operationID, result: result})
 		requireQuittingState(t, m)
