@@ -21,7 +21,9 @@ func (m *model) View() tea.View {
 
 	base := m.baseView()
 	content := base
-	if m.mode == modeConfirm && m.confirmation != nil {
+	if m.mode == modeConfirm && len(m.batchConfirmation) > 0 {
+		content = centerLayer(base, m.upgradeAllModal(), m.width, m.height)
+	} else if m.mode == modeConfirm && m.confirmation != nil {
 		content = centerLayer(base, m.confirmationModal(*m.confirmation), m.width, m.height)
 	} else if m.mode == modePassword {
 		content = centerLayer(base, m.passwordModal(), m.width, m.height)
@@ -606,6 +608,13 @@ func kindPlural(kind brew.Kind) string {
 	return "formulae"
 }
 
+func screenPlural(kind brew.Kind) string {
+	if kind == brew.Cask {
+		return "apps"
+	}
+	return "formulae"
+}
+
 func (m *model) footerLine(width int) string {
 	keys := normalHelp
 	if selected := m.selectedPackage(); m.mode == modeNormal && selected != nil && selected.Untrusted {
@@ -704,6 +713,49 @@ func (m *model) confirmationModalFor(op brew.Operation, pkg brew.Package) string
 		m.roleStyle(m.currentTheme().footer).Render("y: confirm  other: cancel"),
 	}
 	return m.modalStyle().Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) upgradeAllModal() string {
+	lines := []string{
+		m.roleStyle(m.currentTheme().header).Render("Confirm upgrade all"),
+		"Upgrade " + strconv.Itoa(len(m.batchConfirmation)) + " " + screenPlural(m.kind) + "?",
+		"Every Homebrew-reported update on this screen.",
+		"Updates below the display threshold are included.",
+	}
+	if m.batchExcludedSelf {
+		lines = append(lines, "lazybrew itself is excluded while running.")
+	}
+	previewRows := max(0, m.height-len(lines)-3) // border plus the final help row
+	shown := min(len(m.batchConfirmation), previewRows)
+	if shown < len(m.batchConfirmation) && shown > 0 {
+		shown-- // reserve the final preview row for the honest hidden count
+	}
+	maxWidth := max(1, m.width-6)
+	for _, pkg := range m.batchConfirmation[:shown] {
+		update := pkg.Name + "  " + pkg.Version + " → " + pkg.LatestVersion
+		lines = append(lines, lipgloss.NewStyle().MaxWidth(maxWidth).Render(update))
+	}
+	if hidden := len(m.batchConfirmation) - shown; hidden > 0 {
+		lines = append(lines, "… +"+strconv.Itoa(hidden)+" more")
+	}
+	lines = append(lines, m.roleStyle(m.currentTheme().footer).Render("y: confirm  other: cancel"))
+	return m.modalStyle().Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) upgradeAllFits() bool {
+	if len(m.batchConfirmation) == 0 || m.width < minimumWidth || m.height < minimumHeight {
+		return false
+	}
+	modal := m.upgradeAllModal()
+	if lipgloss.Width(modal) > m.width || lipgloss.Height(modal) > m.height {
+		return false
+	}
+	for _, pkg := range m.batchConfirmation {
+		if !m.confirmationFits(pkg) {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *model) passwordModal() string {

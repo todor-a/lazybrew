@@ -336,6 +336,13 @@ type listResultMsg struct {
 	done     <-chan struct{}
 }
 
+type fleetResultMsg struct {
+	id       uint64
+	packages map[brew.Kind][]brew.Package
+	err      error
+	done     <-chan struct{}
+}
+
 type sizesResultMsg struct {
 	id    uint64
 	sizes brew.Sizes
@@ -433,14 +440,18 @@ type model struct {
 	// is separate from verb because a dialog can open while a job runs, and
 	// writing the dialog's verb over the running job's would retarget every
 	// user-facing string of an operation already in flight.
-	confirmVerb brew.Operation
-	operation   *brew.Package
+	confirmVerb       brew.Operation
+	batchConfirmation []brew.Package
+	batchExcludedSelf bool
+	operation         *brew.Package
 	// queue holds confirmed operations waiting for the running job to finish.
 	// Entries carry their own immutable snapshot and verb, taken at
 	// confirmation time exactly as a directly-started job's are. FIFO, run
 	// strictly serially: brew does not support concurrent mutations, and the
 	// job plumbing below is single-slot by design.
-	queue []queuedOperation
+	queue          []queuedOperation
+	batchTotal     int
+	batchCompleted int
 	// verb is the running job's verb, captured when the job starts and as
 	// immutable as its snapshot: every user-facing string and the argv both
 	// derive from it, so a later selection change cannot retarget an in-flight
@@ -582,6 +593,8 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case listResultMsg:
 		return m, m.handleListResult(msg)
+	case fleetResultMsg:
+		return m, m.handleFleetResult(msg)
 	case sizesResultMsg:
 		return m, m.handleSizesResult(msg)
 	case jobStartedMsg:
@@ -751,8 +764,9 @@ func queuedStatus(op brew.Operation, name string) string {
 	return "Queued " + words(op).lower + " " + name
 }
 
+func isLazybrew(pkg brew.Package) bool { return pkg.Kind == brew.Cask && pkg.Name == "lazybrew" }
 func isSelfUninstall(op brew.Operation, pkg brew.Package) bool {
-	return op == brew.Uninstall && pkg.Kind == brew.Cask && pkg.Name == "lazybrew"
+	return op == brew.Uninstall && isLazybrew(pkg)
 }
 
 func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
@@ -778,8 +792,10 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 		return m.switchKind()
 	case "d", "D":
 		return m.confirmOperation(brew.Uninstall)
-	case "u", "U":
+	case "u":
 		return m.confirmOperation(brew.Upgrade)
+	case "U":
+		return m.confirmUpgradeAll()
 	case "t", "T":
 		return m.reviewTrust()
 	case "n", "N":
@@ -860,6 +876,9 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 // snapshot, and the fit check are the security-relevant parts and must never be
 // re-derived per verb.
 func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
+	if m.batchTotal > 0 {
+		return nil
+	}
 	selected := m.selectedPackage()
 	if selected == nil {
 		return nil
@@ -898,10 +917,51 @@ func (m *model) confirmOperation(op brew.Operation) tea.Cmd {
 		return nil
 	}
 	snapshot := *selected
+	m.batchConfirmation = nil
+	m.batchExcludedSelf = false
 	m.confirmation = &snapshot
 	m.confirmVerb = op
 	m.mode = modeConfirm
 	m.status, m.priority = confirmTitle(op), true
+	return nil
+}
+
+func (m *model) confirmUpgradeAll() tea.Cmd {
+	if m.jobRunning() {
+		return nil
+	}
+	packages := m.listCache[m.kind]
+	batch := make([]brew.Package, 0, len(packages))
+	excludedSelf := false
+	for _, pkg := range packages {
+		if pkg.LatestVersion == "" || pkg.LatestVersion == pkg.Version || pkg.Pinned || pkg.Untrusted {
+			continue
+		}
+		if isLazybrew(pkg) {
+			excludedSelf = true
+			continue
+		}
+		batch = append(batch, pkg)
+	}
+	if len(batch) == 0 {
+		if excludedSelf {
+			m.status, m.priority = "Only lazybrew is outdated; upgrade it after quitting", false
+		} else {
+			m.status, m.priority = "No "+screenPlural(m.kind)+" to upgrade", false
+		}
+		return nil
+	}
+	m.confirmation = nil
+	m.confirmVerb = brew.Upgrade
+	m.batchConfirmation = batch
+	m.batchExcludedSelf = excludedSelf
+	if !m.upgradeAllFits() {
+		m.clearBatch()
+		m.status, m.priority = "Widen terminal to confirm", true
+		return nil
+	}
+	m.mode = modeConfirm
+	m.status, m.priority = "Confirm upgrade all", true
 	return nil
 }
 
@@ -988,11 +1048,36 @@ func (m *model) updateSearch(key tea.KeyPressMsg) tea.Cmd {
 func (m *model) updateConfirmation(key tea.KeyPressMsg) tea.Cmd {
 	snapshot := m.confirmation
 	m.confirmation = nil
+	batch := m.batchConfirmation
 	// The dialog returns to the window it opened over: plain browsing, or
 	// browsing under a running job.
 	resume := modeNormal
 	if m.jobRunning() {
 		resume = modeOperation
+	}
+	if len(batch) > 0 {
+		if key.Key().Text != "y" {
+			m.clearBatch()
+			m.mode = resume
+			m.status, m.priority = "Upgrade all cancelled", true
+			return nil
+		}
+		if !m.upgradeAllFits() {
+			m.clearBatch()
+			m.mode = resume
+			m.status, m.priority = "Terminal too small; upgrade all cancelled", true
+			return nil
+		}
+		m.batchConfirmation = nil
+		m.batchExcludedSelf = false
+		m.batchTotal = len(batch)
+		m.batchCompleted = 0
+		m.verb = brew.Upgrade
+		m.queue = make([]queuedOperation, 0, len(batch)-1)
+		for _, pkg := range batch[1:] {
+			m.queue = append(m.queue, queuedOperation{verb: brew.Upgrade, pkg: pkg})
+		}
+		return m.startUninstall(batch[0])
 	}
 	if key.Key().Text != "y" || snapshot == nil {
 		m.mode = resume
@@ -1321,7 +1406,9 @@ func (m *model) handleJobStartFailed(msg jobStartFailedMsg) tea.Cmd {
 	} else {
 		m.status = startFailedStatus(m.verb)
 	}
-	m.status += queueDropSuffix(m.dropQueue())
+	dropped := m.dropQueue()
+	m.status += m.batchProgressSuffix() + queueDropSuffix(dropped)
+	m.clearBatch()
 	m.priority = true
 	return nil
 }
@@ -1401,7 +1488,9 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 		"authTimedOut", result.AuthTimedOut, "err", result.Err, "queued", len(m.queue))
 	switch {
 	case result.CleanupErr != nil:
-		status := cleanupFailedStatus(m.verb, flattenStatus(result.CleanupErr.Error()))
+		dropped := m.dropQueue()
+		status := cleanupFailedStatus(m.verb, flattenStatus(result.CleanupErr.Error())) + m.batchProgressSuffix() + queueDropSuffix(dropped)
+		m.clearBatch()
 		cmd := m.beginQuit(1)
 		m.status, m.priority = status, true
 		return cmd
@@ -1421,6 +1510,9 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 	case result.Err != nil:
 		m.finishOperation(flattenStatus(result.Err.Error()))
 	default:
+		if m.batchTotal > 0 {
+			m.batchCompleted++
+		}
 		if m.operation != nil && isSelfUninstall(m.verb, *m.operation) {
 			return m.beginQuit(0)
 		}
@@ -1431,6 +1523,10 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 		// very next job.
 		if len(m.queue) > 0 {
 			next := m.queue[0]
+			if !m.confirmationFits(next.pkg) {
+				m.finishOperation(tooSmallStatus(next.verb))
+				return nil
+			}
 			m.queue = m.queue[1:]
 			m.verb = next.verb
 			slog.Debug("job popped from queue", "verb", next.verb.Verb(), "name", next.pkg.Name, "remaining", len(m.queue))
@@ -1440,16 +1536,35 @@ func (m *model) handleJobResult(msg jobResultMsg) tea.Cmd {
 		sizesCmd := m.invalidateCaches()
 		m.mode = modeOperation
 		m.spinnerActive = true
+		if m.batchTotal > 0 {
+			return tea.Batch(m.startFleetReload(selection), sizesCmd, m.spinner.Tick)
+		}
 		return tea.Batch(m.startList(loadAfterOperation, selection), sizesCmd, m.spinner.Tick)
 	}
 	return nil
 }
 
 func (m *model) finishOperation(status string) {
+	dropped := m.dropQueue()
 	m.mode = modeNormal
-	m.status, m.priority = status+queueDropSuffix(m.dropQueue()), true
+	m.status, m.priority = status+m.batchProgressSuffix()+queueDropSuffix(dropped), true
+	m.clearBatch()
 	m.operation = nil
 	m.cancelReason = cancelNone
+}
+
+func (m *model) batchProgressSuffix() string {
+	if m.batchTotal == 0 {
+		return ""
+	}
+	return " · " + strconv.Itoa(m.batchCompleted) + " of " + strconv.Itoa(m.batchTotal) + " upgraded"
+}
+
+func (m *model) clearBatch() {
+	m.batchConfirmation = nil
+	m.batchExcludedSelf = false
+	m.batchTotal = 0
+	m.batchCompleted = 0
 }
 
 func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
@@ -1465,52 +1580,93 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 	m.listCancel = cancel
 	homebrew, threshold := m.homebrew, m.outdatedMinimum
 	return func() tea.Msg {
-		// Two concurrent reads, one command: the inventory and Homebrew's outdated
-		// verdict for the same kind, joined before either local is read. The
-		// annotated packages reach the existing message, cache, and renderers, so
-		// a cached kind switch keeps its marks and nothing downstream changes.
-		var (
-			wg            sync.WaitGroup
-			packages      []brew.Package
-			listErr       error
-			outdated      []brew.OutdatedPackage
-			outdatedKnown bool
-			untrusted     []brew.UntrustedPackage
-		)
-		wg.Add(3)
-		go func() {
-			defer wg.Done()
-			packages, listErr = homebrew.List(ctx, kind)
-		}()
-		go func() {
-			defer wg.Done()
-			// A failed outdated read is absorbed, exactly as a failed dependent
-			// lookup is: the list still loads and simply carries no marks. Absence
-			// of evidence must never render as an assurance.
-			if rows, err := homebrew.Outdated(ctx, kind); err == nil {
-				outdated, outdatedKnown = rows, true
-			}
-		}()
-		go func() {
-			defer wg.Done()
-			// Absorbed exactly like a failed outdated read, and this is also the
-			// path a Homebrew without `brew trust` takes: the list still loads and
-			// simply carries no trust marks.
-			if names, err := homebrew.Untrusted(ctx, kind); err == nil {
-				untrusted = names
-			}
-		}()
-		wg.Wait()
+		packages, err := loadPackages(ctx, homebrew, kind, threshold)
 		close(done)
 		return listResultMsg{
 			id:       id,
 			kind:     kind,
 			purpose:  purpose,
-			packages: markUntrusted(markOutdated(packages, outdated, outdatedKnown, threshold), untrusted),
-			err:      listErr,
+			packages: packages,
+			err:      err,
 			done:     done,
 		}
 	}
+}
+
+func (m *model) startFleetReload(selection int) tea.Cmd {
+	m.loading = true
+	m.loadPurpose = loadAfterOperation
+	m.loadSelection = selection
+	m.loadID++
+	id := m.loadID
+	m.spinnerActive = true
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.supervisor.setList(cancel, done)
+	m.listCancel = cancel
+	homebrew, threshold := m.homebrew, m.outdatedMinimum
+	return func() tea.Msg {
+		var casks, formulae []brew.Package
+		var caskErr, formulaErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			casks, caskErr = loadPackages(ctx, homebrew, brew.Cask, threshold)
+		}()
+		go func() {
+			defer wg.Done()
+			formulae, formulaErr = loadPackages(ctx, homebrew, brew.Formula, threshold)
+		}()
+		wg.Wait()
+		close(done)
+		return fleetResultMsg{
+			id: id,
+			packages: map[brew.Kind][]brew.Package{
+				brew.Cask: casks, brew.Formula: formulae,
+			},
+			err:  errors.Join(caskErr, formulaErr),
+			done: done,
+		}
+	}
+}
+
+// loadPackages is the one annotated-inventory read used by an ordinary screen
+// load and by the post-batch fleet refresh. Keeping the join here means neither
+// caller can forget dependency, pinned, outdated, or trust evidence.
+func loadPackages(ctx context.Context, homebrew brew.Homebrew, kind brew.Kind, threshold outdatedThreshold) ([]brew.Package, error) {
+	var (
+		wg            sync.WaitGroup
+		packages      []brew.Package
+		listErr       error
+		outdated      []brew.OutdatedPackage
+		outdatedKnown bool
+		untrusted     []brew.UntrustedPackage
+	)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		packages, listErr = homebrew.List(ctx, kind)
+	}()
+	go func() {
+		defer wg.Done()
+		// A failed outdated read is absorbed, exactly as a failed dependent
+		// lookup is: the list still loads and simply carries no marks. Absence
+		// of evidence must never render as an assurance.
+		if rows, err := homebrew.Outdated(ctx, kind); err == nil {
+			outdated, outdatedKnown = rows, true
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// Absorbed exactly like a failed outdated read, and this is also the path
+		// a Homebrew without `brew trust` takes: no false assurance is added.
+		if names, err := homebrew.Untrusted(ctx, kind); err == nil {
+			untrusted = names
+		}
+	}()
+	wg.Wait()
+	return markUntrusted(markOutdated(packages, outdated, outdatedKnown, threshold), untrusted), listErr
 }
 
 // markOutdated stamps Homebrew's verdict onto the inventory rows it names. The
@@ -1706,6 +1862,44 @@ func (m *model) handleListResult(msg listResultMsg) tea.Cmd {
 		m.mode = modeNormal
 		m.status, m.priority = "", false
 	}
+	return m.selectInfo()
+}
+
+func (m *model) handleFleetResult(msg fleetResultMsg) tea.Cmd {
+	m.supervisor.clearList(msg.done)
+	if msg.id != m.loadID {
+		return nil
+	}
+	if m.listCancel != nil {
+		m.listCancel()
+	}
+	m.listCancel = nil
+	m.loading = false
+	m.spinnerActive = false
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+	if m.cancelReason == cancelTerminal {
+		m.finishOperation(tooSmallStatus(m.verb))
+		return m.selectInfo()
+	}
+	if msg.err != nil {
+		m.setPackages(nil, 0)
+		m.info.Select(nil)
+		m.finishOperation(flattenStatus(msg.err.Error()))
+		return nil
+	}
+	for kind, packages := range msg.packages {
+		m.listCache[kind] = packages
+	}
+	m.persistSnapshot()
+	m.setPackages(msg.packages[m.kind], m.loadSelection)
+	total := m.batchTotal
+	m.clearBatch()
+	m.mode = modeNormal
+	m.operation = nil
+	m.cancelReason = cancelNone
+	m.status, m.priority = "Upgraded "+strconv.Itoa(total)+" packages", true
 	return m.selectInfo()
 }
 
@@ -1933,6 +2127,11 @@ func (m *model) resize(width, height int) tea.Cmd {
 			m.mode = modeOperation
 		}
 		m.status, m.priority = tooSmallStatus(m.confirmVerb), true
+	}
+	if len(m.batchConfirmation) > 0 && !m.upgradeAllFits() {
+		m.clearBatch()
+		m.mode = modeNormal
+		m.status, m.priority = "Terminal too small; upgrade all cancelled", true
 	}
 	if m.operation != nil && !m.confirmationFits(*m.operation) && m.cancelReason == cancelNone {
 		m.cancelReason = cancelTerminal

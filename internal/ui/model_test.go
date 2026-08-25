@@ -31,6 +31,7 @@ type fakeHomebrew struct {
 	trusted      brew.Package
 	err          error
 	listStarted  chan struct{}
+	listMu       sync.Mutex
 	listCalls    map[brew.Kind]int
 	dependents   map[string][]string
 	sizes        brew.Sizes
@@ -58,10 +59,12 @@ func (f *fakeHomebrew) Sizes(ctx context.Context) (brew.Sizes, error) {
 }
 
 func (f *fakeHomebrew) List(ctx context.Context, kind brew.Kind) ([]brew.Package, error) {
+	f.listMu.Lock()
 	if f.listCalls == nil {
 		f.listCalls = make(map[brew.Kind]int)
 	}
 	f.listCalls[kind]++
+	f.listMu.Unlock()
 	if f.listStarted != nil {
 		close(f.listStarted)
 		<-ctx.Done()
@@ -552,6 +555,194 @@ func TestOperationsQueueAndRunSerially(t *testing.T) {
 	}
 	if pane := strings.Join(m.infoLines(40, 10), "\n"); strings.Contains(pane, "Queue") {
 		t.Fatalf("queue block survived the drain: %q", pane)
+	}
+}
+
+func TestUpgradeAllSnapshotsEligiblePackagesFromOnlyTheActiveScreen(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	casks := []brew.Package{
+		{Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+		{Name: "patchy", Version: "1.0.0", LatestVersion: "1.0.1", Kind: brew.Cask},
+		{Name: "pinned", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Pinned: true},
+		{Name: "untrusted", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Untrusted: true},
+		{Name: "current", Version: "1.0", Kind: brew.Cask},
+		{Name: "lazybrew", Version: "0.4.0", LatestVersion: "0.5.0", Kind: brew.Cask, Outdated: true},
+	}
+	m.listCache[brew.Cask] = casks
+	m.listCache[brew.Formula] = []brew.Package{{
+		Name: "other-screen", Version: "1.0", LatestVersion: "2.0", Kind: brew.Formula, Outdated: true,
+	}}
+	m.setPackages(casks, 0)
+	m.query = "Alpha"
+	m.applyQuery(0)
+
+	m.Update(textKey("U"))
+	if m.mode != modeConfirm || m.confirmation != nil || !m.batchExcludedSelf {
+		t.Fatalf("batch confirmation: mode=%v selected=%v excludedSelf=%v", m.mode, m.confirmation, m.batchExcludedSelf)
+	}
+	got := make([]string, len(m.batchConfirmation))
+	for i, pkg := range m.batchConfirmation {
+		got[i] = pkg.Name
+	}
+	if !slices.Equal(got, []string{"Alpha", "patchy"}) {
+		t.Fatalf("batch=%q, want active-screen eligible packages including the threshold-suppressed update", got)
+	}
+
+	m.listCache[brew.Cask][0].Name = "retargeted-after-confirmation"
+	_, command := m.Update(textKey("y"))
+	for _, msg := range immediateMessages(command) {
+		if started, ok := msg.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+	if uninstaller.starts != 1 || len(uninstaller.started) != 1 || uninstaller.started[0].Name != "Alpha" ||
+		len(m.queue) != 1 || m.queue[0].verb != brew.Upgrade || m.queue[0].pkg.Name != "patchy" ||
+		m.batchTotal != 2 || m.batchCompleted != 0 {
+		t.Fatalf("started=%+v queue=%+v total=%d completed=%d", uninstaller.started, m.queue, m.batchTotal, m.batchCompleted)
+	}
+	m.Update(textKey("d"))
+	if m.mode != modeOperation || m.confirmation != nil || len(m.queue) != 1 {
+		t.Fatalf("manual operation entered immutable batch: mode=%v confirmation=%v queue=%d", m.mode, m.confirmation != nil, len(m.queue))
+	}
+
+	homebrew := m.homebrew.(*fakeHomebrew)
+	caskCalls, formulaCalls := homebrew.listCalls[brew.Cask], homebrew.listCalls[brew.Formula]
+	uninstaller.job.finish(privileged.Result{})
+	uninstaller.job = newFakeJob()
+	_, command = m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+	for _, msg := range immediateMessages(command) {
+		if started, ok := msg.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+	if uninstaller.starts != 2 || m.operation == nil || m.operation.Name != "patchy" || m.batchCompleted != 1 {
+		t.Fatalf("second start: starts=%d operation=%+v completed=%d", uninstaller.starts, m.operation, m.batchCompleted)
+	}
+
+	uninstaller.job.finish(privileged.Result{})
+	_, command = m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+	for _, msg := range immediateMessages(command) {
+		_, next := m.Update(msg)
+		for _, followup := range immediateMessages(next) {
+			m.Update(followup)
+		}
+	}
+	if m.mode != modeNormal || m.status != "Upgraded 2 packages" || m.batchTotal != 0 || m.batchCompleted != 0 {
+		t.Fatalf("batch result: mode=%v status=%q total=%d completed=%d", m.mode, m.status, m.batchTotal, m.batchCompleted)
+	}
+	if !slices.Equal(uninstaller.startedOps, []brew.Operation{brew.Upgrade, brew.Upgrade}) {
+		t.Fatalf("batch operations=%v, want only the existing upgrade verb", uninstaller.startedOps)
+	}
+	if homebrew.listCalls[brew.Cask] != caskCalls+1 || homebrew.listCalls[brew.Formula] != formulaCalls+1 {
+		t.Fatalf("fleet reload calls: casks=%d formulae=%d, want %d/%d", homebrew.listCalls[brew.Cask], homebrew.listCalls[brew.Formula], caskCalls+1, formulaCalls+1)
+	}
+}
+
+func TestUpgradeAllFailureAndCancellationReportPartialProgressAndDropTheQueue(t *testing.T) {
+	tests := []struct {
+		name   string
+		result privileged.Result
+		want   string
+	}{
+		{name: "failure", result: privileged.Result{Err: errors.New("brew failed")}, want: "brew failed · 1 of 3 upgraded · 1 queued dropped"},
+		{name: "cancellation", result: privileged.Result{Cancelled: true}, want: "Upgrade cancelled · 1 of 3 upgraded · 1 queued dropped"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, uninstaller := newTestModel(t)
+			packages := []brew.Package{
+				{Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+				{Name: "Beta", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+				{Name: "Gamma", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+			}
+			m.listCache[brew.Cask] = packages
+			m.setPackages(packages, 0)
+			m.Update(textKey("U"))
+			_, command := m.Update(textKey("y"))
+			for _, msg := range immediateMessages(command) {
+				if started, ok := msg.(jobStartedMsg); ok {
+					m.Update(started)
+				}
+			}
+
+			uninstaller.job.finish(privileged.Result{})
+			uninstaller.job = newFakeJob()
+			_, command = m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+			for _, msg := range immediateMessages(command) {
+				if started, ok := msg.(jobStartedMsg); ok {
+					m.Update(started)
+				}
+			}
+			uninstaller.job.finish(tt.result)
+			m.Update(jobResultMsg{id: m.operationID, result: tt.result})
+
+			if m.mode != modeNormal || m.status != tt.want || len(m.queue) != 0 || m.batchTotal != 0 || m.batchCompleted != 0 {
+				t.Fatalf("result: mode=%v status=%q queue=%d total=%d completed=%d", m.mode, m.status, len(m.queue), m.batchTotal, m.batchCompleted)
+			}
+		})
+	}
+}
+
+func TestResizeCancelsAnUpgradeAllConfirmationThatNoLongerFits(t *testing.T) {
+	m, _ := newTestModel(t)
+	packages := []brew.Package{{
+		Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true,
+	}}
+	m.listCache[brew.Cask] = packages
+	m.setPackages(packages, 0)
+	m.Update(textKey("U"))
+	m.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+
+	if m.mode != modeNormal || len(m.batchConfirmation) != 0 || m.status != "Terminal too small; upgrade all cancelled" {
+		t.Fatalf("resize result: mode=%v batch=%d status=%q", m.mode, len(m.batchConfirmation), m.status)
+	}
+}
+
+func TestUpgradeAllUsesScreenVocabularyAndLowercaseConfirmation(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	m.Update(textKey("U"))
+	if m.status != "No apps to upgrade" {
+		t.Fatalf("empty apps status=%q", m.status)
+	}
+
+	packages := []brew.Package{{
+		Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true,
+	}}
+	m.listCache[brew.Cask] = packages
+	m.setPackages(packages, 0)
+	m.Update(textKey("U"))
+	m.Update(textKey("Y"))
+	if m.mode != modeNormal || m.status != "Upgrade all cancelled" || uninstaller.starts != 0 {
+		t.Fatalf("uppercase confirmation: mode=%v status=%q starts=%d", m.mode, m.status, uninstaller.starts)
+	}
+}
+
+func TestUpgradeAllDoesNotStartAQueuedPackageAfterTheTerminalShrinks(t *testing.T) {
+	m, uninstaller := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 24})
+	packages := []brew.Package{
+		{Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+		{Name: strings.Repeat("long", 30), Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+	}
+	m.listCache[brew.Cask] = packages
+	m.setPackages(packages, 0)
+	m.Update(textKey("U"))
+	_, command := m.Update(textKey("y"))
+	for _, msg := range immediateMessages(command) {
+		if started, ok := msg.(jobStartedMsg); ok {
+			m.Update(started)
+		}
+	}
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	if m.cancelReason != cancelNone {
+		t.Fatal("the short running package stopped fitting too")
+	}
+
+	uninstaller.job.finish(privileged.Result{})
+	uninstaller.job = newFakeJob()
+	m.Update(jobResultMsg{id: m.operationID, result: privileged.Result{}})
+	if uninstaller.starts != 1 || m.status != "Terminal too small; upgrade cancelled · 1 of 2 upgraded · 1 queued dropped" || len(m.queue) != 0 {
+		t.Fatalf("shrunken queue: starts=%d status=%q queue=%d", uninstaller.starts, m.status, len(m.queue))
 	}
 }
 

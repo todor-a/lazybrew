@@ -3,10 +3,25 @@
 package e2e
 
 import (
+	"os"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestWaitProcessIDIgnoresAnIncompleteFile(t *testing.T) {
+	path := t.TempDir() + "/lazybrew.pid"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = os.WriteFile(path, []byte("1234\n"), 0o600)
+	}()
+	if got := waitProcessID(t, path); got != 1234 {
+		t.Fatalf("pid=%d, want 1234", got)
+	}
+}
 
 func TestProcessLifecycle(t *testing.T) {
 	binary := buildApp(t)
@@ -94,6 +109,19 @@ func TestBlackBox(t *testing.T) {
 
 	fixture.setCaskVersion(t, "2.0")
 	fixture.requireCaskOutdated(t)
+	t.Run("reviews and cancels upgrade all for the apps screen", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "U")
+		app.waitForAfter(t, at, "Confirm upgrade all", 10*time.Second)
+		app.waitForAfter(t, at, "Every Homebrew-reported update on this screen.", 10*time.Second)
+		app.send(t, "n")
+		app.waitForAfter(t, at, "Upgrade all cancelled", 10*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireCaskInstalled(t, "1.0")
+	})
 	t.Run("upgrades a real outdated cask", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
 		app.waitFor(t, "casks installed", 20*time.Second)
@@ -147,6 +175,22 @@ func TestBlackBox(t *testing.T) {
 
 	fixture.setRootVersion(t, "2.0")
 	fixture.requireOutdated(t)
+	t.Run("reviews and cancels upgrade all for the formulae screen", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "\t")
+		app.waitForAfter(t, at, "formulae installed", 20*time.Second)
+		at = app.mark()
+		app.send(t, "U")
+		app.waitForAfter(t, at, "Confirm upgrade all", 10*time.Second)
+		app.waitForAfter(t, at, "formulae?", 10*time.Second)
+		app.send(t, "n")
+		app.waitForAfter(t, at, "Upgrade all cancelled", 10*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireInstalled(t, fixture.root, "1.0")
+	})
 	fixture.pinRoot(t)
 	t.Run("filters and refuses a pinned formula upgrade", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
@@ -195,8 +239,7 @@ func TestBlackBox(t *testing.T) {
 		// Either is rendered only after command completion; the installed-version
 		// assertion below proves the failed upgrade preserved the package.
 		app.waitForAnyAfter(t, at, 30*time.Second, "Error:", "::error::")
-		app.send(t, "q")
-		app.wait(t)
+		app.quitWhenReady(t, 20*time.Second)
 		fixture.requireOnlyInstalled(t, fixture.root, "1.0")
 	})
 	fixture.setRootVersion(t, "2.0")

@@ -111,13 +111,10 @@ func waitProcessID(t *testing.T, path string) int {
 	for time.Now().Before(deadline) {
 		value, err := os.ReadFile(path)
 		if err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(value)))
-			if err != nil {
-				t.Fatal(err)
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(value))); parseErr == nil {
+				return pid
 			}
-			return pid
-		}
-		if !errors.Is(err, os.ErrNotExist) {
+		} else if !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -174,6 +171,39 @@ func (a *terminalApp) waitForAnyAfter(t *testing.T, offset int, timeout time.Dur
 
 func (a *terminalApp) wait(t *testing.T) {
 	a.waitCode(t, 0)
+}
+
+func (a *terminalApp) quitWhenReady(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.done:
+			a.wait(t)
+			return
+		default:
+		}
+		if _, err := io.WriteString(a.input, "q"); err != nil {
+			select {
+			case <-a.done:
+				a.wait(t)
+				return
+			default:
+				t.Fatalf("send quit: %v", err)
+			}
+		}
+		select {
+		case <-a.done:
+			a.wait(t)
+			return
+		case <-ticker.C:
+		case <-timer.C:
+			t.Fatalf("lazybrew did not accept quit\n%s", a.output.bytes())
+		}
+	}
 }
 
 func (a *terminalApp) waitCode(t *testing.T, want int) {
