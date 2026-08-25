@@ -148,18 +148,26 @@ func (a *terminalApp) mark() int { return a.output.len() }
 
 func (a *terminalApp) waitForAfter(t *testing.T, offset int, value string, timeout time.Duration) {
 	t.Helper()
+	a.waitForAnyAfter(t, offset, timeout, value)
+}
+
+func (a *terminalApp) waitForAnyAfter(t *testing.T, offset int, timeout time.Duration, values ...string) {
+	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	for {
-		if bytes.Contains(a.output.bytesFrom(offset), []byte(value)) {
-			return
+		output := a.output.bytesFrom(offset)
+		for _, value := range values {
+			if bytes.Contains(output, []byte(value)) {
+				return
+			}
 		}
 		select {
 		case <-a.output.changed:
 		case <-a.done:
-			t.Fatalf("lazybrew exited before rendering %q\n%s", value, a.output.bytes())
+			t.Fatalf("lazybrew exited before rendering any of %q\n%s", values, a.output.bytes())
 		case <-timer.C:
-			t.Fatalf("timed out waiting for %q\n%s", value, a.output.bytes())
+			t.Fatalf("timed out waiting for any of %q\n%s", values, a.output.bytes())
 		}
 	}
 }
