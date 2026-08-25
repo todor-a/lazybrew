@@ -239,8 +239,7 @@ func TestBlackBox(t *testing.T) {
 		// Either is rendered only after command completion; the installed-version
 		// assertion below proves the failed upgrade preserved the package.
 		app.waitForAnyAfter(t, at, 30*time.Second, "Error:", "::error::")
-		app.send(t, "q")
-		app.wait(t)
+		app.quitWhenReady(t, 20*time.Second)
 		fixture.requireOnlyInstalled(t, fixture.root, "1.0")
 	})
 	fixture.setRootVersion(t, "2.0")
