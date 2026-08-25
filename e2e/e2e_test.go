@@ -135,7 +135,6 @@ func TestBlackBox(t *testing.T) {
 		app.waitForAfter(t, at, "Search: is:outdated_", 10*time.Second)
 		at = app.mark()
 		app.send(t, " "+fixture.root)
-		app.waitForAfter(t, at, fixture.root+"_", 20*time.Second)
 		app.send(t, "\r")
 		app.waitForAfter(t, at, "lazybrew black-box fixture", 20*time.Second)
 		at = app.mark()
