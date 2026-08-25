@@ -189,10 +189,12 @@ func TestBlackBox(t *testing.T) {
 		at = app.mark()
 		app.send(t, "u")
 		app.waitForAfter(t, at, "Upgrade "+fixture.root+"?", 10*time.Second)
+		at = app.mark()
 		app.send(t, "y")
-		// Homebrew spells the tail `Error:` locally and `::error::` in Actions.
-		// This captured-output prefix reaches the UI only on command failure.
-		app.waitForAfter(t, at, "Fetching downloads for: "+fixture.root, 30*time.Second)
+		// Homebrew uses ordinary errors locally and Actions annotations in CI.
+		// Either is rendered only after command completion; the installed-version
+		// assertion below proves the failed upgrade preserved the package.
+		app.waitForAnyAfter(t, at, 30*time.Second, "Error:", "::error::")
 		app.send(t, "q")
 		app.wait(t)
 		fixture.requireOnlyInstalled(t, fixture.root, "1.0")
