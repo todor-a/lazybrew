@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.5.0](https://github.com/todor-a/lazybrew/compare/v0.4.0...v0.5.0) (2026-08-25)
+
+
+### Features
+
+* **trust:** review and trust untrusted packages ([#49](https://github.com/todor-a/lazybrew/issues/49)) ([3a88223](https://github.com/todor-a/lazybrew/commit/3a88223d9d49e2d56c62834be0d242b0bbc40ef4))
+* **upgrade:** add active-screen upgrade all ([#51](https://github.com/todor-a/lazybrew/issues/51)) ([0e75673](https://github.com/todor-a/lazybrew/commit/0e75673a4b831f008f7a40adf9b65c5f46974d9b))
+
+
+### Fixes
+
+* **ci:** install stable Homebrew for release E2E ([#52](https://github.com/todor-a/lazybrew/issues/52)) ([876d3bd](https://github.com/todor-a/lazybrew/commit/876d3bdb305dc31e93cd9043f65b49914854c594))
+* **ui:** exit cleanly after self-uninstall ([#41](https://github.com/todor-a/lazybrew/issues/41)) ([accec17](https://github.com/todor-a/lazybrew/commit/accec17f464dc92c75cf53b21764af0802469289))
+* **ui:** mark pinned formulae ([#43](https://github.com/todor-a/lazybrew/issues/43)) ([906afb7](https://github.com/todor-a/lazybrew/commit/906afb7b6e363f0cacfbc7b8dbc59dc780c469bc))
+
 ## [0.4.0](https://github.com/todor-a/lazybrew/compare/v0.3.0...v0.4.0) (2026-08-24)
 
 
