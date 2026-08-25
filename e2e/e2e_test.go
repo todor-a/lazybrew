@@ -3,10 +3,25 @@
 package e2e
 
 import (
+	"os"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestWaitProcessIDIgnoresAnIncompleteFile(t *testing.T) {
+	path := t.TempDir() + "/lazybrew.pid"
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		_ = os.WriteFile(path, []byte("1234\n"), 0o600)
+	}()
+	if got := waitProcessID(t, path); got != 1234 {
+		t.Fatalf("pid=%d, want 1234", got)
+	}
+}
 
 func TestProcessLifecycle(t *testing.T) {
 	binary := buildApp(t)

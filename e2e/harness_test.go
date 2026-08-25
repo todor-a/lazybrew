@@ -111,13 +111,10 @@ func waitProcessID(t *testing.T, path string) int {
 	for time.Now().Before(deadline) {
 		value, err := os.ReadFile(path)
 		if err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(value)))
-			if err != nil {
-				t.Fatal(err)
+			if pid, parseErr := strconv.Atoi(strings.TrimSpace(string(value))); parseErr == nil {
+				return pid
 			}
-			return pid
-		}
-		if !errors.Is(err, os.ErrNotExist) {
+		} else if !errors.Is(err, os.ErrNotExist) {
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond)
