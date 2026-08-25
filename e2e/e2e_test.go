@@ -161,7 +161,9 @@ func TestBlackBox(t *testing.T) {
 		app.send(t, "u")
 		app.waitForAfter(t, at, "Upgrade "+fixture.root+"?", 10*time.Second)
 		app.send(t, "y")
-		app.waitForAfter(t, at, "Error: "+fixture.tap+"/", 30*time.Second)
+		// Homebrew spells the tail `Error:` locally and `::error::` in Actions.
+		// This captured-output prefix reaches the UI only on command failure.
+		app.waitForAfter(t, at, "Fetching downloads for: "+fixture.root, 30*time.Second)
 		app.send(t, "q")
 		app.wait(t)
 		fixture.requireOnlyInstalled(t, fixture.root, "1.0")
