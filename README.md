@@ -16,7 +16,7 @@
 - **Outdated, with the actual versions** — `↑` marks plus `12.24.4 → 12.24.5` right in the row, straight from `brew outdated`; pinned formulae show `P` instead.
 - **Size accounting** — every formula's installed size from one `du` pass over the Cellar, with the fleet total. Casks are deliberately unsized: their Caskroom entries lie, and lazybrew does not print numbers that are not sizes.
 - **A real table** — column headings with a sort cue; `o` cycles name ↑ → size ↓ → size ↑ → name ↓ per screen.
-- **Untrusted-tap guidance** — `!` marks packages Homebrew refuses to load; the info pane explains formula/cask trust scope and shows narrow `trust`/`untrust` commands without loading the definition.
+- **Trust review without loading code** — `!` marks packages Homebrew refuses to load; `t` fetches tap provenance, shows its remote, visibility, contents, and revision, then offers trust for that package only.
 - **Removal verdicts** — the info pane shows what depends on a formula and whether it is safe to remove.
 - **Queue actions, keep browsing** — the list stays navigable while an uninstall or upgrade runs; confirm more actions and they queue up and run serially, shown live at the bottom of the info pane.
 - **Dependency X-ray** — formulae installed as dependencies are hidden by default; `a` reveals them.
@@ -40,7 +40,7 @@ Upgrade or remove lazybrew itself with `brew upgrade --cask lazybrew` / `brew un
 | `/` or `s` | Search (substring, case-insensitive) |
 | `a` | Show/hide dependency-only formulae |
 | `o` | Cycle the sort: name ↑ · size ↓ · size ↑ · name ↓ |
-| `t` | Cycle the theme (persisted) |
+| `n` | Cycle the theme (persisted) |
 | `r` | Refresh from Homebrew |
 | `q` | Quit |
 
@@ -48,6 +48,7 @@ Upgrade or remove lazybrew itself with `brew upgrade --cask lazybrew` / `brew un
 | --- | --- |
 | `d` | Uninstall the selected package (confirm first) |
 | `u` | Upgrade the selected package — only when Homebrew reports it outdated and it is not pinned |
+| `t` | Review and trust the selected untrusted package |
 
 While an action runs you can keep browsing, and `d`/`u` on other rows queues them.
 
@@ -55,7 +56,7 @@ In search: type to filter, `Enter` keeps the query, `Esc` clears it, `Tab` compl
 
 ## Safety
 
-Uninstall and upgrade are delegated to `brew` — lazybrew never constructs shell commands, and package names are validated before they reach an argv.
+Uninstall, upgrade, and trust are delegated to `brew` — lazybrew never constructs shell commands, and package identities are validated before they reach an argv. Trust is package-scoped, runs as your user without `sudo`, and never offers whole-tap trust.
 
 The confirmation is deliberately strict: **only lowercase `y` proceeds**. `Y`, `Enter`, `Esc`, `q` — everything else cancels. If Homebrew needs administrator rights, lazybrew shows a masked password dialog inside the TUI; the password is handed to Homebrew's askpass mechanism and is never cached, logged, or written anywhere else. Cancelling mid-run also drops everything still queued — destructive work never continues past a cancel.
 

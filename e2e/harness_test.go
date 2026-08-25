@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -392,9 +393,26 @@ func (f *brewFixture) untrustFormulae(t *testing.T) {
 	f.mustRun(t, "trust", "--cask", f.tap+"/"+f.cask)
 }
 
-func (f *brewFixture) trustFormulae(t *testing.T) {
+func (f *brewFixture) trustDependency(t *testing.T) {
 	t.Helper()
-	f.mustRun(t, "trust", "--formula", f.tap+"/"+f.root, f.tap+"/"+f.dep)
+	f.mustRun(t, "trust", "--formula", f.tap+"/"+f.dep)
+}
+
+func (f *brewFixture) requireFormulaTrust(t *testing.T, name string, want bool) {
+	t.Helper()
+	var report struct {
+		Formulae []string `json:"formulae"`
+	}
+	if err := json.Unmarshal([]byte(f.mustRun(t, "trust", "--json=v1")), &report); err != nil {
+		t.Fatal(err)
+	}
+	got := false
+	for _, formula := range report.Formulae {
+		got = got || formula == f.tap+"/"+name
+	}
+	if got != want {
+		t.Fatalf("formula %s trusted=%v, want %v; trust store=%v", name, got, want, report.Formulae)
+	}
 }
 
 func (f *brewFixture) cleanupOldRoot(t *testing.T) {

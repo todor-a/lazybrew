@@ -51,26 +51,29 @@ type Package struct {
 	// data, not identity, exactly like Outdated: it is outside the info-cache
 	// key, the filter value, and every argv.
 	Untrusted bool
-	// FullName and Tap retain the trust decision's source identity for display.
-	// They are populated only for an untrusted package and never reach argv.
+	// FullName and Tap retain Homebrew's trust identity. They are populated only
+	// for an untrusted package and reach argv only through safeTrustPackage.
 	FullName string
 	Tap      string
 }
 
-// UntrustedPackage is the display identity Homebrew refuses to load. FullName
-// and Tap come only from `brew list --full-name`; none of these values reach
-// argv.
+// UntrustedPackage is the identity Homebrew refuses to load. FullName and Tap
+// come only from `brew list --full-name`; stamping them onto a Package does not
+// make them executable until safeTrustPackage validates the whole identity.
 type UntrustedPackage struct {
 	Name     string
 	FullName string
 	Tap      string
 }
 
-// Homebrew exposes the read-only operations used by the application.
+// Homebrew exposes the direct operations used by the application. Trust is the
+// only mutation; uninstall and upgrade stay behind the privileged runner.
 type Homebrew interface {
 	List(context.Context, Kind) ([]Package, error)
 	Outdated(context.Context, Kind) ([]OutdatedPackage, error)
 	Untrusted(context.Context, Kind) ([]UntrustedPackage, error)
+	TrustDetails(context.Context, Package) (TrustDetails, error)
+	Trust(context.Context, Package) error
 	Info(context.Context, Package) (string, error)
 	Uses(context.Context, Package) ([]string, error)
 	Sizes(context.Context) (Sizes, error)
@@ -82,12 +85,103 @@ var (
 	errInvalidKind = errors.New("invalid Homebrew package kind")
 	errUnsafeInfo  = errors.New("Unsafe package name; info refused")
 	errUnsafeUses  = errors.New("Unsafe package name; dependents refused")
+	errUnsafeTrust = errors.New("Unsafe trust identity; trust refused")
 	errUsesKind    = errors.New("dependents are only defined for formulae")
 )
 
 // New returns the real Homebrew command adapter.
 func New() Homebrew {
 	return client{}
+}
+
+// TrustDetails is the tap provenance Homebrew can report without loading an
+// untrusted package definition.
+type TrustDetails struct {
+	Remote       string
+	Private      bool
+	CustomRemote bool
+	Head         string
+	LastCommit   string
+	Formulae     int
+	Casks        int
+	Commands     int
+}
+
+// TrustDetails loads source metadata only after the user opens the trust
+// review. The tap and full package identity are revalidated together before
+// either can reach argv.
+func (client) TrustDetails(ctx context.Context, pkg Package) (TrustDetails, error) {
+	if !safeTrustPackage(pkg) {
+		return TrustDetails{}, errUnsafeTrust
+	}
+	stdout, _, err := run(ctx, []string{"tap-info", "--json=v1", pkg.Tap})
+	if err != nil {
+		return TrustDetails{}, err
+	}
+	var report []struct {
+		Name         string   `json:"name"`
+		Remote       string   `json:"remote"`
+		Private      bool     `json:"private"`
+		CustomRemote bool     `json:"custom_remote"`
+		Head         string   `json:"HEAD"`
+		LastCommit   string   `json:"last_commit"`
+		Formulae     []string `json:"formula_names"`
+		Casks        []string `json:"cask_tokens"`
+		Commands     []string `json:"command_files"`
+	}
+	if json.Unmarshal(stdout, &report) != nil || len(report) != 1 || report[0].Name != pkg.Tap ||
+		hasControl(report[0].Remote, report[0].Head, report[0].LastCommit) {
+		return TrustDetails{}, errors.New("Homebrew returned invalid trust details")
+	}
+	details := report[0]
+	return TrustDetails{
+		Remote: details.Remote, Private: details.Private, CustomRemote: details.CustomRemote,
+		Head: details.Head, LastCommit: details.LastCommit,
+		Formulae: len(details.Formulae), Casks: len(details.Casks), Commands: len(details.Commands),
+	}, nil
+}
+
+func hasControl(values ...string) bool {
+	for _, value := range values {
+		for _, r := range value {
+			if unicode.IsControl(r) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Trust grants the narrow package-level permission confirmed by the user. It
+// deliberately bypasses the privileged runner: Homebrew trust is per-user and
+// elevating it would write the wrong user's trust store.
+func (client) Trust(ctx context.Context, pkg Package) error {
+	if !safeTrustPackage(pkg) {
+		return errUnsafeTrust
+	}
+	_, _, err := run(ctx, []string{"trust", "--" + string(pkg.Kind), pkg.FullName})
+	return err
+}
+
+func safeTrustPackage(pkg Package) bool {
+	if !pkg.Untrusted || (pkg.Kind != Cask && pkg.Kind != Formula) {
+		return false
+	}
+	parts := strings.Split(pkg.FullName, "/")
+	if len(parts) != 3 || pkg.Tap != parts[0]+"/"+parts[1] || pkg.Name != parts[2] {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, "-") {
+			return false
+		}
+		for _, r := range part {
+			if r == '/' || unicode.IsControl(r) || unicode.IsSpace(r) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // List enumerates one kind's installed packages.
@@ -326,9 +420,9 @@ func (client) Untrusted(ctx context.Context, kind Kind) ([]UntrustedPackage, err
 // and trusted packages: a tap key has two segments and a package key three, so
 // the two vocabularies cannot collide.
 //
-// SECURITY: the names returned are only ever used as marker-map keys, matched
-// against names that came from `brew list`. They never reach an argv, exactly
-// like parseSizes' keys, so this path needs no second validator.
+// SECURITY: these names are marker-map keys matched against `brew list` until
+// an explicitly confirmed trust action revalidates the complete identity with
+// safeTrustPackage. No other argv reads them.
 func untrustedPackages(output string, kind Kind, store trustStore) []UntrustedPackage {
 	trustedPackages := store.Formulae
 	if kind == Cask {

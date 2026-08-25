@@ -25,6 +25,8 @@ func (m *model) View() tea.View {
 		content = centerLayer(base, m.confirmationModal(*m.confirmation), m.width, m.height)
 	} else if m.mode == modePassword {
 		content = centerLayer(base, m.passwordModal(), m.width, m.height)
+	} else if m.mode == modeTrust && m.trustPackage != nil {
+		content = centerLayer(base, m.trustModal(), m.width, m.height)
 	}
 	view := tea.NewView(content)
 	view.AltScreen = true
@@ -606,6 +608,9 @@ func kindPlural(kind brew.Kind) string {
 
 func (m *model) footerLine(width int) string {
 	keys := normalHelp
+	if selected := m.selectedPackage(); m.mode == modeNormal && selected != nil && selected.Untrusted {
+		keys = append(append(footerKeys(nil), normalHelp[:1]...), append(footerKeys{trustBinding}, normalHelp[1:]...)...)
+	}
 	switch {
 	case m.mode == modeQuitting:
 		keys = cleanupHelp
@@ -619,6 +624,10 @@ func (m *model) footerLine(width int) string {
 		keys = confirmHelp
 	case m.mode == modePassword:
 		keys = progressHelp(m.verb)
+	case m.mode == modeTrust && m.trustPending:
+		keys = trustLoadingHelp
+	case m.mode == modeTrust:
+		keys = trustHelp
 	case m.mode == modeOperation:
 		keys = operationHelp(m.verb)
 	}
@@ -709,6 +718,67 @@ func (m *model) passwordModal() string {
 		m.roleStyle(m.currentTheme().footer).Render("Enter: submit  Esc: cancel"),
 	}
 	return m.modalStyle().Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) trustModal() string {
+	bodyWidth := min(64, max(24, m.width-8))
+	wrap := func(value string) string {
+		return lipgloss.NewStyle().Width(bodyWidth).Render(value)
+	}
+	pkg := *m.trustPackage
+	lines := []string{
+		m.roleStyle(m.currentTheme().header).Render("Review " + string(pkg.Kind) + " trust"),
+		"Package  " + pkg.FullName,
+		"Source   " + pkg.Tap,
+	}
+	if pkg.Version != "" {
+		lines = append(lines, "Installed "+pkg.Version)
+	}
+	switch {
+	case m.trusting:
+		lines = append(lines, "", "Trusting package...")
+	case m.trustPending:
+		lines = append(lines, "", "Loading source details...")
+	case m.trustErr != "":
+		lines = append(lines, "", wrap(m.trustErr))
+	case m.trustDetails != nil:
+		details := m.trustDetails
+		visibility := "public"
+		if details.Private {
+			visibility = "private"
+		}
+		if details.CustomRemote {
+			visibility += " · custom remote"
+		}
+		contents := strconv.Itoa(details.Formulae) + " formulae · " + strconv.Itoa(details.Casks) + " casks · " + strconv.Itoa(details.Commands) + " commands"
+		lines = append(lines,
+			"Remote   "+wrap(details.Remote),
+			"Tap      "+visibility,
+			"Contents "+contents,
+		)
+		if details.Head != "" {
+			head := details.Head[:min(7, len(details.Head))]
+			lines = append(lines, "Revision "+head+" · "+details.LastCommit)
+		}
+		lines = append(lines,
+			"",
+			wrap("Trusting permits this package's current and future Ruby definition to run as your user. Other tap items stay untrusted."),
+		)
+	}
+	help := "Esc: cancel"
+	if !m.trustPending && !m.trusting && m.trustDetails != nil && m.trustErr == "" {
+		help = "y: trust package  other: cancel"
+	}
+	lines = append(lines, m.roleStyle(m.currentTheme().footer).Render(help))
+	return m.modalStyle().Render(strings.Join(lines, "\n"))
+}
+
+func (m *model) trustReviewFits() bool {
+	if m.trustPackage == nil || m.width < minimumWidth || m.height < minimumHeight {
+		return false
+	}
+	modal := m.trustModal()
+	return lipgloss.Width(modal) <= m.width && lipgloss.Height(modal) <= m.height
 }
 
 func centerLayer(base, overlay string, width, height int) string {

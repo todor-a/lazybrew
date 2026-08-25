@@ -21,7 +21,7 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 ### Non-goals
 
 - Supporting Linux, Windows, package managers other than Homebrew, or remote Homebrew installations.
-- Installing, pinning, or otherwise mutating packages except uninstalling or upgrading the explicitly confirmed package. **[REWRITE ADDITION]** Amended, as its previous wording said it would be, by the increment that implemented section 9A: upgrading a confirmed package is now permitted and is the only mutation besides uninstalling. Both go through one confirmation, one snapshot, and one privileged path. Reporting which packages `brew outdated` names remains a read.
+- Installing, pinning, or otherwise mutating packages except uninstalling or upgrading the explicitly confirmed package. **[REWRITE ADDITION]** Upgrading is the only package mutation besides uninstalling; both go through one confirmation, one snapshot, and one privileged path. Package-level `brew trust` changes only the current user's Homebrew trust store through its separate review in section 4. Reporting which packages `brew outdated` names remains a read.
 - Listing formulae installed only as dependencies.
 - **[REWRITE ADDITION]** Installing or pinning dependency-only formulae. Replaces the non-goal `Listing formulae installed only as dependencies.`, which forbade the only view that can answer what is consuming disk: on the measured machine the dependency-only set is 180 of 304 installed formulae and holds 7 of the 12 largest packages, including the single largest at 1.5 GB. Dependency-only formulae are now listed behind an explicit toggle that is off at startup (section 4), so the curated default view is unchanged.
 
@@ -48,9 +48,9 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 | `dependency` **[REWRITE ADDITION]** | True when Homebrew reports the formula as not installed on request. Always false for a cask. Display data, not identity, exactly like `version`. |
 | `pinned` **[REWRITE ADDITION]** | True when `brew list --pinned` reports the formula. Always false for a cask and never part of identity or argv. |
 | `untrusted` **[REWRITE ADDITION]** | True when Homebrew's trust store covers neither the third-party package nor its tap. False is never rendered as an assurance of trust. |
-| `fullName` / `tap` **[REWRITE ADDITION]** | The `user/repository/name` and `user/repository` spellings retained only for an untrusted row's guidance. Display data; neither reaches argv. |
+| `fullName` / `tap` **[REWRITE ADDITION]** | The `user/repository/name` and `user/repository` spellings retained only for an untrusted row. They reach argv only through the trust-specific whole-identity validator after explicit confirmation. |
 
-Package identity and the package-info cache key are `(kind, name)`. Version, `outdated`, `dependency`, `pinned`, `untrusted`, `fullName`, and `tap` are display data, not identity.
+Package inventory identity and the package-info cache key are `(kind, name)`. Version, `outdated`, `dependency`, `pinned`, and `untrusted` are display data. Trust is the one narrower boundary: it captures `(kind, name, fullName, tap)` immutably and validates that the three spellings agree before using `fullName` or `tap`.
 
 **[REWRITE ADDITION]** `outdated` replaces nothing; it is a fourth field on a value that previously carried three. It is display data specifically: it stays out of the info cache key, out of the search filter target, and out of every argv, so adding it cannot change which panel is cached, which rows a query matches, or what any command runs. It is set from the section 5 outdated read at list time and is never derived from comparing two version strings.
 
@@ -99,7 +99,8 @@ Key handling is mode-first. A modal mode receives ordinary keys before the under
 | `tab` | Switch cask ↔ formula, reset selection and scroll offset to zero, load that kind from the section 8 list cache or from `brew list` on a miss, then target its selected package for info. The query remains active, so the target list arrives already filtered. | **[CURRENT/PARITY]** plus cache **[REWRITE ADDITION]** |
 | `d`, `D` | Open the **uninstall** confirmation for the selected package if one exists and the safety-fit check passes. With no selected package, do nothing. | **[CURRENT/PARITY]** behaviour, **[REWRITE ADDITION]** key |
 | `u`, `U` | Open the **upgrade** confirmation, but only for a package `brew outdated` reports. On a package it does not report, start nothing at all — no confirmation, no snapshot, no job — and set the ordinary status `<name> is up to date`. With no selected package, do nothing. | **[REWRITE ADDITION]** |
-| `t`, `T` | Cycle to the next theme and set status to `Theme: <name>`. | **[CURRENT/PARITY]** |
+| `t`, `T` | On an untrusted row, open the package trust review described below. On every other row, do nothing and omit the binding from the footer. | **[REWRITE ADDITION]** |
+| `n`, `N` | Cycle to the next theme and set status to `Theme: <name>`. | **[CURRENT/PARITY]** key reassignment |
 | `r`, `R` | Perform the refresh contract in section 8. | **[CURRENT/PARITY]** |
 | `a`, `A` | Toggle **all** formulae, dependency-only ones included, into and out of the formula list, resetting selection to the first row, and set status to `Dependencies: shown` / `Dependencies: hidden`. Served from the section 8 list cache: it starts no command and enters no loading state. On the cask list only the status changes and selection is preserved, because casks have no dependency relation — the flag still flips, so the key is never silently dead and a later `tab` lands in the requested state. | **[REWRITE ADDITION]** |
 | `o`, `O` | Toggle row order between source order and installed size, largest first, resetting selection to the first row, and set status to `Sort: size` / `Sort: name`. Also served from the list cache with no command. A no-op on order until the section 5 size pass lands, at which point the requested order is applied. | **[REWRITE ADDITION]** |
@@ -115,7 +116,7 @@ Search is case-insensitive substring matching against `name + " " + version + " 
 
 | Keys | Result |
 |---|---|
-| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `r`, `s`, `/`, and **[REWRITE ADDITION]** `d`, `D`, `o`, `O` have no global meaning while editing. |
+| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `n`, `r`, `s`, `/`, and **[REWRITE ADDITION]** `d`, `D`, `o`, `O` have no global meaning while editing. |
 | `backspace`, `ctrl+h` | Remove the final query rune if one exists. Match a Bubble Tea v2 `KeyBackspace`/`backspace` event; also accept `ctrl+h` if an enhanced keyboard protocol delivers it distinctly. |
 | `enter` | Accept the query, leave it active, and return to normal mode. |
 | `tab` | **[REWRITE ADDITION]** Perform the normal-mode `tab` kind switch and return to normal mode. Parity ignored `tab` here, which made the advertised switch key silently dead while a query was being typed. Search mode is left before the load starts rather than when its result lands, so the mode change is visible immediately; the query is preserved and the target list arrives filtered. |
@@ -134,6 +135,16 @@ While editing, status is exactly `Search: <query>_`. Outside editing, the normal
 | Every other ordinary key, including uppercase `Y`, `q`, `Q`, `enter`, and `esc` | Close the dialog, run no command, and set priority status to `Uninstall cancelled`. |
 
 **[CURRENT/PARITY] Lowercase-only confirmation is mandatory. Uppercase `Y` must cancel.** Bubble Tea key handling must compare the exact key text to `y`; it must not use a case-insensitive binding.
+
+### Trust-review mode
+
+**[REWRITE ADDITION]** Pressing `t` or `T` on an untrusted row copies its complete `(kind, name, fullName, tap)` trust identity into an immutable snapshot and opens a centered review. It then loads tap provenance on demand; startup and list loading never run this slower command. The command runs in a supervised `tea.Cmd`, never inside `Update`, and stale results are discarded by generation.
+
+While provenance is loading, only `esc` cancels. After it loads, lowercase `y` only runs the package-level trust vector in section 5; every other ordinary key cancels. Whole-tap trust is never offered. The modal shows the package, tap, installed version when known, remote URL, public/private and custom-remote flags, counts of formulae/casks/external commands, abbreviated tap revision, last-commit age, and this warning:
+
+`Trusting permits this package's current and future Ruby definition to run as your user. Other tap items stay untrusted.`
+
+The trust command runs directly as the current user, never through the privileged runner and never with `sudo`, because Homebrew's trust store is per-user. Success clears only the selected package's untrusted mark, persists that list snapshot, refreshes its info, returns to normal mode, and sets `Trusted <name>`. A failed provenance read or trust command remains in the modal with the mapped error. If the complete warning cannot fit, close the modal, run no trust mutation, and set `Terminal too small for trust review`.
 
 ### Uninstall-progress mode
 
@@ -167,6 +178,8 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | Pinned set **[REWRITE ADDITION]** | formula | `brew`, `list`, `--pinned` |
 | Full-name inventory **[REWRITE ADDITION]** | cask / formula | `brew`, `list`, `<kind-flag>`, `--full-name` |
 | Trust store **[REWRITE ADDITION]** | — | `brew`, `trust`, `--json`, `v1` |
+| Tap provenance **[REWRITE ADDITION]** | — | `brew`, `tap-info`, `--json=v1`, `<snapshot-tap>` |
+| Trust package **[REWRITE ADDITION]** | cask / formula | `brew`, `trust`, `<kind-flag>`, `<snapshot-fullName>` |
 | Package roots **[REWRITE ADDITION]** | — | `brew`, `--cellar` and `brew`, `--caskroom` |
 | Info | cask | `brew`, `info`, `--cask`, `<name>` |
 | Info | formula | `brew`, `info`, `--formula`, `<name>` |
@@ -186,13 +199,15 @@ Homebrew may spell a third-party outdated formula as `user/tap/name` while the i
 
 **[REWRITE ADDITION]** The full-name inventory and trust-store reads run concurrently and annotate, never replace, the ordinary inventory. A tap-qualified package is untrusted when neither its exact package entry nor its two-segment tap entry appears in the kind-specific store. Retain all three identity spellings on that row for display. A failed trust read—including Homebrew versions without `brew trust`—absorbs into no marks and no claim that any package is trusted.
 
+**[REWRITE ADDITION]** Before either on-demand trust vector, require an untrusted formula or cask whose `fullName` has exactly three nonempty, non-option-like path segments, whose first two segments equal `tap`, and whose final segment equals `name`. Reject controls and whitespace. The package-level mutation is the only argv that reads `fullName`; the provenance read is the only argv that reads `tap`. A mismatch starts no process and reports `Unsafe trust identity; trust refused`. Reject control characters in tap provenance before rendering it, so a remote or commit string cannot inject terminal controls into the decision dialog.
+
 **[REWRITE ADDITION]** Every command this adapter starts inherits `HOMEBREW_NO_AUTO_UPDATE=1`, appended to the environment rather than substituted for it.
 
 `install`, `outdated`, `upgrade`, `bundle` and `release` are Homebrew's `AUTO_UPDATE_COMMANDS`. With `HOMEBREW_NO_AUTO_UPDATE` unset — the default — the first such command in each `HOMEBREW_AUTO_UPDATE_SECS` window runs `brew update --auto-update` before the command that was asked for: a network fetch that mutates the local Homebrew installation and its tap clones. Adding the outdated vectors brought the first such command into this application, and `list`, `info` and `uses` are not in that set, so nothing here triggered it before.
 
 Two consequences make the suppression mandatory rather than an optimisation. These reads run inside the load that gates first paint, so a launch a day after the machine's last fetch would hold `Loading casks...` for as long as the network takes, with only supervised `q` accepted — unbounded, not merely slow. And the auto-update report is written to stdout in the same process that then execs the real command, so it lands in the buffer this adapter parses; a deleted-formula or deleted-cask line names an installed package by construction, and would be read back as inventory or as an outdated name.
 
-It is applied to every read rather than only to the outdated vectors. Section 2 promises an application that mutates nothing except a doubly-confirmed uninstall, and updating the user's Homebrew as a side effect of drawing a list is outside that promise whichever read triggers it.
+It is applied to every read rather than only to the outdated vectors. Section 2 permits only explicitly confirmed uninstall, upgrade, and package trust mutations; updating Homebrew as a side effect of drawing a list is outside that promise whichever read triggers it.
 
 A test must assert the variable as the child received it, not as the parent set it. The development machine's shell exports `HOMEBREW_NO_AUTO_UPDATE=1`, which is precisely why this went unnoticed while the feature was built and measured.
 
@@ -276,14 +291,14 @@ Do not use Huh or another modal package. `View` is pure: it renders state and mu
 **[CURRENT/PARITY]** At 32×9 or larger, the screen contains:
 
 1. A full outer border.
-2. Header row: the section 3 list tab bar, alone. **[REWRITE ADDITION]** Parity rendered `lazybrew [<theme>]  <active-list>  Tab: switch`; all three parts around the tab bar are removed. The app name is redundant on a screen the user just launched. The theme name is permanent chrome for a value that only matters while cycling it, and `t` already reports `Theme: <name>` in the status row on demand. The `Tab: switch` hint named no destination; the tab bar itself does, and `tab switch` is now carried in the normal footer. **[REWRITE ADDITION]** The header additionally carries the section 5 fleet total, right aligned against the interior edge, once the measurement has landed. It is held to the same standard that removed the app name and the theme name: unlike those, the total is the question this screen exists to answer and is always relevant, and the status row is already contested by query, count, and errors and is the first thing clipped at 32 columns. The value is bare, with no label, because 22 cells of tab bar plus one gap plus at most 6 cells of value fits the 30-cell minimum interior and a labelled form does not. It reports the whole fleet, not the visible subset, so it does not flicker as the query or the dependency toggle changes. It is omitted rather than clipped whenever the interior cannot hold `label + 1 + value`, so the pinned tab-bar cell slots are never disturbed.
+2. Header row: the section 3 list tab bar, alone. **[REWRITE ADDITION]** Parity rendered `lazybrew [<theme>]  <active-list>  Tab: switch`; all three parts around the tab bar are removed. The app name is redundant on a screen the user just launched. The theme name is permanent chrome for a value that only matters while cycling it, and `n` already reports `Theme: <name>` in the status row on demand. The `Tab: switch` hint named no destination; the tab bar itself does, and `tab switch` is now carried in the normal footer. **[REWRITE ADDITION]** The header additionally carries the section 5 fleet total, right aligned against the interior edge, once the measurement has landed. It is held to the same standard that removed the app name and the theme name: unlike those, the total is the question this screen exists to answer and is always relevant, and the status row is already contested by query, count, and errors and is the first thing clipped at 32 columns. The value is bare, with no label, because 22 cells of tab bar plus one gap plus at most 6 cells of value fits the 30-cell minimum interior and a labelled form does not. It reports the whole fleet, not the visible subset, so it does not flicker as the query or the dependency toggle changes. It is omitted rather than clipped whenever the interior cannot hold `label + 1 + value`, so the pinned tab-bar cell slots are never disturbed.
 3. A horizontal rule.
 4. A package content region of exactly `height - 7` rows.
 5. A horizontal rule.
 6. One status row.
 7. One footer/help row.
 
-The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels.
+The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: n | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. On an untrusted row, insert `Review trust: t` immediately after `Search: /`; its exact 30-cell minimum-width prefix is `Search: / | Review trust: t | `, so the action remains discoverable where the info pane is absent.
 
 **[REWRITE ADDITION]** The action leads and the key answers it, joined by ` | `, replacing parity's key-first `<key> <label>` pairs separated by two spaces. A footer is read by someone looking for a verb, not by someone scanning single letters. `Search:` advertises `/` alone; `s` and `S` still work and are still bound, they are simply not spelled out.
 
@@ -373,7 +388,7 @@ Trust: brew trust --<formula|cask> <user/repository/name>
 Undo: brew untrust --<formula|cask> <user/repository/name>
 ```
 
-Both commands must land within the existing non-scrollable info viewport at the tested 120×24 E2E size. Trust is never performed by lazybrew in this phase; these full-name values remain display-only. Package-level trust is deliberately shown instead of whole-tap trust because the latter permits every current and future formula, cask, and external command in that tap to load.
+Both commands must land within the existing non-scrollable info viewport at the tested 120×24 E2E size. The same immutable full name drives the `t` review, where lowercase `y` can perform the displayed package-level trust. Package-level trust is deliberately used instead of whole-tap trust because the latter permits every current and future formula, cask, and external command in that tap to load.
 
 Three deliberate restraints, because this pane feeds a destructive action:
 
@@ -443,7 +458,7 @@ Search-edit mode applies the search role to both the outer border and search pro
 
 ### Centered overlays
 
-**[REWRITE ADDITION]** Render confirmation and password dialogs as bordered Lip Gloss layers centered over the complete base screen. The base screen remains visible underneath. The modal layer has a higher Z value and receives all ordinary input.
+**[REWRITE ADDITION]** Render confirmation, password, and trust-review dialogs as bordered Lip Gloss layers centered over the complete base screen. The base screen remains visible underneath. The modal layer has a higher Z value and receives all ordinary input.
 
 The ordinary confirmation dialog contains exactly:
 
@@ -461,13 +476,17 @@ The password dialog contains:
 - A focused field labeled `Password: ` using the mask glyph `•`
 - Help: `Enter: submit  Esc: cancel`
 
-No helper-provided prompt, argv text, socket text, or other untrusted string is rendered in either dialog.
+No helper-provided prompt, argv text, socket text, or other untrusted string is rendered in the confirmation or password dialog.
+
+The trust-review dialog follows the trust-review mode contract in section 4. Its package/tap values come from the immutable snapshot and its provenance values come from `brew tap-info`; no package definition is loaded to render it. Its help is `Esc: cancel` while loading, then `y: trust package  other: cancel` only after provenance succeeds.
 
 ### Size safety
 
 **[CURRENT/PARITY]** Minimum usable size is 32 columns × 9 rows. Below it, render only `lazybrew: terminal too small (need 32x9)`. Ignore non-quit input; `q` and `Q` still quit.
 
 Before opening confirmation, construct and ANSI-measure the largest of the confirmation dialog, password dialog including retry text, `Uninstalling <name>...`, `Cancelling <name>...`, and the list-reload statuses in section 8. Include border and horizontal padding. If any required line or dialog exceeds the current terminal, run no command and set `Widen terminal to confirm`.
+
+The trust review independently ANSI-measures each rendered loading, error, review, and mutation state. If the complete current state cannot fit, cancel the review with `Terminal too small for trust review`; a truncated warning must never remain confirmable.
 
 A resize re-runs this safety check:
 
@@ -572,7 +591,7 @@ The key, priority-status, and footer contracts while a list command is active ar
 |---|---|---|---|
 | Startup cask load | `Loading casks...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Kind-switch load | `Loading casks...` or `Loading formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
+| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: n | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
 | User refresh | `Refreshing casks...` or `Refreshing formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Post-uninstall reload | `Reloading casks...` or `Reloading formulae...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
 
@@ -670,7 +689,7 @@ The fit check measures the longest string of **both** verb sets and both confirm
 
 ### Keys, and two deviations from this design
 
-Uninstall moved from `u` to `d`; `u` starts an upgrade; the dependency toggle moved from `d` to `a`. That is the first deviation: this section originally specified `g` for upgrade. The footer became `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: t | Refresh: r | Quit: q`, and the section 6 exact 30-cell prefix at width 32 is unchanged, because `Uninstall:` stayed third.
+Uninstall moved from `u` to `d`; `u` starts an upgrade; the dependency toggle moved from `d` to `a`. That is the first deviation: this section originally specified `g` for upgrade. The footer became `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: n | Refresh: r | Quit: q`, and the section 6 exact 30-cell prefix at width 32 is unchanged, because `Uninstall:` stayed third.
 
 `u` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the ordinary status `<name> is up to date`. The privileged machinery stays unreachable for an operation that would be a no-op, and the section 6 freshness cell is exactly the affordance that tells the user which rows `u` acts on.
 
@@ -1036,11 +1055,11 @@ Parity and rewrite are complete only when all of the following are true:
 | Keys/modes | Bubble Tea model tests send every listed key/message plus representative unlisted keys in every mode, including `KeyBackspace`, separately delivered `ctrl+h`, physical `KeyDelete`, and `tea.PasteMsg`. | Exact transition tables; `y` confirms, `Y` cancels, search/password steal global letters, loading modes supervise `q`, progress/reload ignore controls, physical Delete and password paste are ignored. |
 | Filtering/selection | Model tests edit/accept/cancel queries, switch kinds, reload shorter/empty lists, and resize viewports. | Source-order substring results and all indices/offsets remain valid. |
 | Layout | Golden or structural view tests at 31×8, 32×9, 71×N, 72×N, narrow names, long names, long status, and multiline info. **[REWRITE ADDITION]** Plus: an outdated row renders ` >↑ ` and a fresh row ` >  ` at identical total width; the freshness cell is independent of the selection marker; and the measured width of `↑` is asserted to be one cell. | Minimum-size message, split threshold, clipping, wrapping, status, and no border/divider overwrite; at width 32 the ANSI-stripped normal footer is exactly the 30-cell prefix specified in section 6; every row is exactly the terminal width at 32, 72, and 120 columns with marked and unmarked rows both on screen, and the section 6 name-column counts hold. |
-| Command vectors | Table-driven unit tests for both kinds and list/info/uninstall, including unsafe names. **[REWRITE ADDITION]** Also both formula list vectors as an ordered invocation sequence, the two root vectors, and the `du` vector. | Exact argv equality, including the complete ordered sequence of invocations per operation; shell path is never used; unsafe info/uninstall text is exact and no process starts. |
+| Command vectors | Table-driven unit tests for both kinds and list/info/uninstall, including unsafe names. **[REWRITE ADDITION]** Also both formula list vectors as an ordered invocation sequence, the two root vectors, the `du` vector, tap provenance, and package trust. | Exact argv equality, including the immutable full trust identity; shell path is never used; mismatched trust spellings and unsafe info/uninstall names start no process. |
 | Installed size **[REWRITE ADDITION]** | Unit tests over real captured `du` output for exact values and both root totals; malformed, out-of-level, and foreign rows; nonzero exit with partial output; a missing root; both roots missing; an empty root path; missing brew. An integration test runs the real `/usr/bin/du` over a Homebrew-shaped temporary tree. | Exact per-package KB and fleet total; unreadable rows skipped rather than guessed; partial measurement kept and a wholly failed pass reported; `-k` and `-d 1` verified by observed behaviour rather than by a recorded string; names from `du` never reach an argv. |
 | Dependency visibility **[REWRITE ADDITION]** | Model tests toggle `d` on both lists, assert the visible set, the status, the installed count, that no command starts, that retention is not mutated, and that a round trip is idempotent. | Marked rows hidden by default and revealed by `d`; cask list changes status only and preserves selection; `listCalls` unchanged; retained slice byte-identical after any sequence of toggles. |
 | Parsing/errors | Unit tests for blank lines, empty/multiple versions, missing brew, generic spawn error, stderr/stdout/fallback exit errors, and shared preparation/mapping calls. | Results and strings exactly match sections 3 and 5; uninstall has no duplicate validator, argv builder, resolver, or failure mapper. |
-| Keys/modes | Bubble Tea model tests send every listed key/message plus representative unlisted keys in every mode, including `KeyBackspace`, separately delivered `ctrl+h`, physical `KeyDelete`, and `tea.PasteMsg`. | Exact transition tables; `y` confirms, `Y` cancels, search/password steal global letters, loading modes supervise `q`, progress/reload ignore controls, physical Delete and password paste are ignored. |
+| Keys/modes | Bubble Tea model tests send every listed key/message plus representative unlisted keys in every mode, including trust review, `KeyBackspace`, separately delivered `ctrl+h`, physical `KeyDelete`, and `tea.PasteMsg`. | Exact transition tables; `t` reviews trust, `n` cycles themes, lowercase `y` confirms, uppercase `Y` cancels, search/password steal global letters, loading modes supervise `q`, progress/reload ignore controls, physical Delete and password paste are ignored. |
 | Filtering/selection | Model tests edit/accept/cancel queries, switch kinds, reload shorter/empty lists, and resize viewports. | Source-order substring results and all indices/offsets remain valid. |
 | Layout | Golden or structural view tests at 31×8, 32×9, 71×N, 72×N, narrow names, long names, long status, and multiline info. **[REWRITE ADDITION]** Also 120×N, the origin and size columns, and the header total, each asserted with the measurement both landed and absent. | Minimum-size message, split threshold, clipping, wrapping, status, and no border/divider overwrite; at width 32 the ANSI-stripped normal footer is exactly the 30-cell prefix specified in section 6, unchanged by the two added bindings. **[REWRITE ADDITION]** Every row is exactly the terminal width in both size states; the origin column sits at identical cells in both, so nothing reflows when sizes land; the total is right aligned, present at the 32-column minimum, absent before measuring, and omitted rather than clipped when it cannot fit. |
 | Themes | View tests for cycle order and every role; no-color rendering test. | Exact table values; Lazygit selected row not bold with color; reverse+bold without color. |
@@ -1057,7 +1076,7 @@ Parity and rewrite are complete only when all of the following are true:
 | Process cleanup | Integration-test a fake brew tree that ignores SIGTERM, holds descriptors, survives where controllable, and simulates permission-denied/uninspectable members. | Direct brew child is `Wait`-reaped exactly once; SIGTERM then bounded SIGKILL/observation; fixture descendants are observed exited; owned goroutines/FDS close; exact paths are removed; survivor/uninspectable cases return explicit cleanup failure; cleanup is idempotent. |
 | TTY/lifecycle | PTY and non-PTY subprocess tests cover normal quit, runtime failure fallback, ctrl+c/SIGINT, SIGTERM, and quit during active list, info, starting uninstall, and active uninstall. | Exact stderr and exit codes 0, 1, 130, or 143; terminal restored; list/info result-reap messages and uninstall terminal result are awaited; no owned command/goroutine/descriptor is abandoned; cleanup failures are surfaced. |
 | Quiescence | Model/runtime test reaches idle after list/info/uninstall completion and then observes commands/redraw triggers. | No 100 ms or other polling timer exists; with no active spinner/command, no tick is scheduled, and a stale tick neither mutates state nor schedules another. |
-| End-to-end Homebrew | PTY-drive the built binary against real Homebrew and a temporary `lazybrew/e2e` tap containing a local cask, an on-request formula, and its dependency. Run on stable Homebrew for macOS ARM and Intel, plus Homebrew `main` on a schedule. | Non-TTY startup refuses cleanly; `q`, Ctrl+C, and SIGTERM exit 0, 130, and 143; the deliberately untrusted formula is explained without loading and narrow fixture trust is restored; theme, sort, filter, and refresh controls land; the cask upgrades and uninstalls; a pinned outdated formula refuses upgrade; a real formula failure preserves 1.0 and restores controls; the repaired formula upgrades to 2.0; dependencies are revealed; the formula uninstalls; and cleanup removes every fixture. |
+| End-to-end Homebrew | PTY-drive the built binary against real Homebrew and a temporary `lazybrew/e2e` tap containing a local cask, an on-request formula, and its dependency. Run on stable Homebrew for macOS ARM and Intel, plus Homebrew `main` on a schedule. | Non-TTY startup refuses cleanly; `q`, Ctrl+C, and SIGTERM exit 0, 130, and 143; the deliberately untrusted formula is explained without loading, its provenance is reviewed, and `t` trusts only that formula in Homebrew's real trust store; `n`, sort, filter, and refresh controls land; the cask upgrades and uninstalls; a pinned outdated formula refuses upgrade; a real formula failure preserves 1.0 and restores controls; the repaired formula upgrades to 2.0; dependencies are revealed; the formula uninstalls; and cleanup removes every fixture. |
 | End-to-end authentication | Keep three boundaries distinct: pure verifier fixtures as above; mandatory Darwin kernel/Security.framework integration with controlled processes; and a capability-gated PTY test in which fake Homebrew invokes real `/usr/bin/sudo -A` only when the host permits non-destructive sudo askpass testing. | Pure fixtures prove only verifier logic, Darwin integration proves kernel acquisition/fail-closed behavior, and the real-sudo positive path proves on-demand dialog/masking/fresh retry/submission when capability is available; skipping that capability-gated positive test does not replace either mandatory lower layer. |
 | Clean cutover | Repository check after implementation. | Go tests pass and no Python source/test/bytecode/helper artifact remains under `lazybrew/`. |
 

@@ -10,7 +10,7 @@
     "theme": {
       "type": "string",
       "enum": ["Lazygit", "Bright", "Ocean", "Dracula"],
-      "description": "Color theme. Cycle in-app with t."
+      "description": "Color theme. Cycle in-app with n."
     },
     "outdatedThreshold": {
       "type": "string",
