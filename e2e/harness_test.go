@@ -5,11 +5,13 @@ package e2e
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,8 +30,25 @@ func buildApp(t *testing.T) string {
 	return binary
 }
 
+func runWithoutTerminal(t *testing.T, binary string) (string, int) {
+	t.Helper()
+	command := exec.Command(binary)
+	command.Env = testEnvironment(t.TempDir())
+	command.Stdin = strings.NewReader("")
+	command.Stdout = io.Discard
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	err := command.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("non-terminal run error = %v, want an exit error", err)
+	}
+	return stderr.String(), exitErr.ExitCode()
+}
+
 type terminalApp struct {
 	command  *exec.Cmd
+	pid      int
 	input    io.WriteCloser
 	output   terminalOutput
 	done     chan struct{}
@@ -49,9 +68,10 @@ func startApp(t *testing.T, binary, home string) *terminalApp {
 		done:   make(chan struct{}),
 		output: terminalOutput{changed: make(chan struct{}, 1)},
 	}
+	pidFile := filepath.Join(t.TempDir(), "lazybrew.pid")
 	app.command = exec.Command(
 		"/usr/bin/script", "-q", "-e", "/dev/null",
-		"/bin/sh", "-c", `stty rows 24 cols 80; exec "$1"`, "sh", binary,
+		"/bin/sh", "-c", `stty rows 24 cols 120; echo "$$" > "$2"; exec "$1"`, "sh", binary, pidFile,
 	)
 	app.command.Env = testEnvironment(home)
 	app.command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -80,13 +100,42 @@ func startApp(t *testing.T, binary, home string) *terminalApp {
 			<-app.done
 		}
 	})
+	app.pid = waitProcessID(t, pidFile)
 	return app
+}
+
+func waitProcessID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		value, err := os.ReadFile(path)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(value)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pid
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("lazybrew pid was not recorded")
+	return 0
 }
 
 func (a *terminalApp) send(t *testing.T, value string) {
 	t.Helper()
 	if _, err := io.WriteString(a.input, value); err != nil {
 		t.Fatalf("send %q: %v", value, err)
+	}
+}
+
+func (a *terminalApp) signal(t *testing.T, signal syscall.Signal) {
+	t.Helper()
+	if err := syscall.Kill(a.pid, signal); err != nil {
+		t.Fatalf("signal %v: %v", signal, err)
 	}
 }
 
@@ -115,6 +164,10 @@ func (a *terminalApp) waitForAfter(t *testing.T, offset int, value string, timeo
 }
 
 func (a *terminalApp) wait(t *testing.T) {
+	a.waitCode(t, 0)
+}
+
+func (a *terminalApp) waitCode(t *testing.T, want int) {
 	t.Helper()
 	select {
 	case <-a.done:
@@ -123,8 +176,16 @@ func (a *terminalApp) wait(t *testing.T) {
 	}
 	a.waitLock.Lock()
 	defer a.waitLock.Unlock()
+	got := 0
 	if a.waitErr != nil {
-		t.Fatalf("lazybrew exit: %v\n%s", a.waitErr, a.output.bytes())
+		var exitErr *exec.ExitError
+		if !errors.As(a.waitErr, &exitErr) {
+			t.Fatalf("lazybrew exit: %v\n%s", a.waitErr, a.output.bytes())
+		}
+		got = exitErr.ExitCode()
+	}
+	if got != want {
+		t.Fatalf("lazybrew exit=%d, want %d\n%s", got, want, a.output.bytes())
 	}
 }
 
@@ -223,22 +284,31 @@ func installBrewFixture(t *testing.T) *brewFixture {
 	}
 	fixture.caskURL = "file://" + caskPayload
 	fixture.caskSHA = fmt.Sprintf("%x", sha256.Sum256(caskContent))
-	fixture.writeFormula(t, fixture.dep, "LazybrewE2eDep", "1.0", "")
-	fixture.writeFormula(t, fixture.root, "LazybrewE2eRoot", "1.0", fixture.tap+"/"+fixture.dep)
-	fixture.writeCask(t)
-	fixture.mustRun(t, "trust", "--tap", fixture.tap)
+	fixture.writeFormula(t, fixture.dep, "LazybrewE2eDep", "1.0", "", false)
+	fixture.writeFormula(t, fixture.root, "LazybrewE2eRoot", "1.0", fixture.tap+"/"+fixture.dep, false)
+	fixture.writeCask(t, "1.0")
+	fixture.trustInstalledTaps(t)
 	fixture.mustRun(t, "install", "--cask", fixture.tap+"/"+fixture.cask)
 	fixture.mustRun(t, "install", fixture.tap+"/"+fixture.root)
-	fixture.requireCaskInstalled(t)
+	fixture.requireCaskInstalled(t, "1.0")
 	fixture.requireInstalled(t, fixture.root, "1.0")
 	fixture.requireInstalled(t, fixture.dep, "1.0")
 	return fixture
 }
 
-func (f *brewFixture) writeCask(t *testing.T) {
+func (f *brewFixture) trustInstalledTaps(t *testing.T) {
+	t.Helper()
+	args := []string{"trust", "--tap"}
+	for tap := range strings.Lines(f.mustRun(t, "tap")) {
+		args = append(args, strings.TrimSpace(tap))
+	}
+	f.mustRun(t, args...)
+}
+
+func (f *brewFixture) writeCask(t *testing.T, version string) {
 	t.Helper()
 	cask := fmt.Sprintf(`cask %q do
-  version "1.0"
+  version %q
   sha256 %q
   url %q, using: :nounzip
   name "lazybrew black-box cask"
@@ -247,7 +317,7 @@ func (f *brewFixture) writeCask(t *testing.T) {
 
   binary %q
 end
-`, f.cask, f.caskSHA, f.caskURL, f.cask)
+`, f.cask, version, f.caskSHA, f.caskURL, f.cask)
 	dir := filepath.Join(f.tapPath, "Casks")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -257,11 +327,20 @@ end
 	}
 }
 
-func (f *brewFixture) writeFormula(t *testing.T, name, class, version, dependency string) {
+func (f *brewFixture) setCaskVersion(t *testing.T, version string) {
+	t.Helper()
+	f.writeCask(t, version)
+}
+
+func (f *brewFixture) writeFormula(t *testing.T, name, class, version, dependency string, broken bool) {
 	t.Helper()
 	dependsOn := ""
 	if dependency != "" {
 		dependsOn = fmt.Sprintf("  depends_on %q\n", dependency)
+	}
+	install := fmt.Sprintf("    (bin/%q).write \"#!/bin/sh\\\\necho lazybrew-e2e\\\\n\"\n    chmod 0755, bin/%q", name, name)
+	if broken {
+		install = `    odie "lazybrew e2e intentional failure"`
 	}
 	formula := fmt.Sprintf(`class %s < Formula
   desc "lazybrew black-box fixture"
@@ -271,11 +350,10 @@ func (f *brewFixture) writeFormula(t *testing.T, name, class, version, dependenc
   sha256 %q
 %s
   def install
-    (bin/%q).write "#!/bin/sh\\necho lazybrew-e2e\\n"
-    chmod 0755, bin/%q
+%s
   end
 end
-`, class, f.url, version, f.sha256, dependsOn, name, name)
+`, class, f.url, version, f.sha256, dependsOn, install)
 	path := filepath.Join(f.tapPath, "Formula", name+".rb")
 	if err := os.WriteFile(path, []byte(formula), 0o600); err != nil {
 		t.Fatal(err)
@@ -284,7 +362,26 @@ end
 
 func (f *brewFixture) setRootVersion(t *testing.T, version string) {
 	t.Helper()
-	f.writeFormula(t, f.root, "LazybrewE2eRoot", version, f.tap+"/"+f.dep)
+	f.writeFormula(t, f.root, "LazybrewE2eRoot", version, f.tap+"/"+f.dep, false)
+}
+
+func (f *brewFixture) setBrokenRootVersion(t *testing.T, version string) {
+	t.Helper()
+	f.writeFormula(t, f.root, "LazybrewE2eRoot", version, f.tap+"/"+f.dep, true)
+}
+
+func (f *brewFixture) pinRoot(t *testing.T) {
+	t.Helper()
+	f.mustRun(t, "pin", f.root)
+	output := f.mustRun(t, "list", "--pinned")
+	if !slicesContainLine(output, f.root) && !slicesContainLine(output, f.tap+"/"+f.root) {
+		t.Fatalf("fixture was not pinned:\n%s", output)
+	}
+}
+
+func (f *brewFixture) unpinRoot(t *testing.T) {
+	t.Helper()
+	f.mustRun(t, "unpin", f.root)
 }
 
 func (f *brewFixture) cleanupOldRoot(t *testing.T) {
@@ -309,6 +406,14 @@ func (f *brewFixture) requireInstalled(t *testing.T, name, version string) {
 	}
 }
 
+func (f *brewFixture) requireOnlyInstalled(t *testing.T, name, version string) {
+	t.Helper()
+	output := strings.TrimSpace(f.mustRun(t, "list", "--formula", "--versions", name))
+	if output != name+" "+version {
+		t.Fatalf("installed formula = %q, want only version %s", output, version)
+	}
+}
+
 func (f *brewFixture) requireNotInstalled(t *testing.T, name string) {
 	t.Helper()
 	if output, err := f.run("list", "--formula", "--versions", name); err == nil {
@@ -316,11 +421,22 @@ func (f *brewFixture) requireNotInstalled(t *testing.T, name string) {
 	}
 }
 
-func (f *brewFixture) requireCaskInstalled(t *testing.T) {
+func (f *brewFixture) requireCaskInstalled(t *testing.T, version string) {
 	t.Helper()
 	output := strings.TrimSpace(f.mustRun(t, "list", "--cask", "--versions", f.cask))
-	if output != f.cask+" 1.0" {
-		t.Fatalf("installed cask = %q, want %s 1.0", output, f.cask)
+	if output != f.cask+" "+version {
+		t.Fatalf("installed cask = %q, want %s %s", output, f.cask, version)
+	}
+}
+
+func (f *brewFixture) requireCaskOutdated(t *testing.T) {
+	t.Helper()
+	output := f.mustRun(t, "outdated", "--cask", "--json=v2")
+	bare := strings.Contains(output, `"name": "`+f.cask+`"`)
+	qualified := strings.Contains(output, `"name": "`+f.tap+`/`+f.cask+`"`)
+	if !bare && !qualified {
+		info, _ := f.run("info", "--cask", "--json=v2", f.cask)
+		t.Fatalf("fixture cask is not outdated\noutdated: %s\ninfo: %s", output, info)
 	}
 }
 
@@ -361,6 +477,9 @@ func (f *brewFixture) caskInstalled() bool {
 
 func (f *brewFixture) cleanup(t *testing.T) {
 	t.Helper()
+	if f.installed(f.root) {
+		_, _ = f.run("unpin", f.root)
+	}
 	if f.caskInstalled() {
 		if output, err := f.run("uninstall", "--force", "--cask", f.cask); err != nil {
 			t.Errorf("cleanup %s: %v\n%s", f.cask, err, output)

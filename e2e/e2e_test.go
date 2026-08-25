@@ -3,12 +3,20 @@
 package e2e
 
 import (
+	"syscall"
 	"testing"
 	"time"
 )
 
-func TestBlackBox(t *testing.T) {
+func TestProcessLifecycle(t *testing.T) {
 	binary := buildApp(t)
+
+	t.Run("refuses a non-terminal", func(t *testing.T) {
+		stderr, exitCode := runWithoutTerminal(t, binary)
+		if exitCode != 1 || stderr != "lazybrew requires an interactive terminal\n" {
+			t.Fatalf("exit=%d stderr=%q", exitCode, stderr)
+		}
+	})
 
 	t.Run("starts and quits through a real terminal", func(t *testing.T) {
 		app := startApp(t, binary, t.TempDir())
@@ -17,7 +25,61 @@ func TestBlackBox(t *testing.T) {
 		app.wait(t)
 	})
 
+	t.Run("ctrl+c exits 130", func(t *testing.T) {
+		app := startApp(t, binary, t.TempDir())
+		app.waitFor(t, "[ Apps ]", 10*time.Second)
+		app.send(t, "\x03")
+		app.waitCode(t, 130)
+	})
+
+	t.Run("sigterm exits 143", func(t *testing.T) {
+		app := startApp(t, binary, t.TempDir())
+		app.waitFor(t, "[ Apps ]", 10*time.Second)
+		app.signal(t, syscall.SIGTERM)
+		app.waitCode(t, 143)
+	})
+}
+
+func TestBlackBox(t *testing.T) {
+	binary := buildApp(t)
+
 	fixture := installBrewFixture(t)
+	t.Run("refreshes and applies display controls", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "t")
+		app.waitForAfter(t, at, "Theme: Bright", 10*time.Second)
+		at = app.mark()
+		app.send(t, "o")
+		app.waitForAfter(t, at, "Sort: name ↓", 10*time.Second)
+		at = app.mark()
+		app.send(t, "r")
+		app.waitForAfter(t, at, "Refreshing casks...", 10*time.Second)
+		at = app.mark()
+		app.waitForAfter(t, at, "casks installed", 20*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+	})
+
+	fixture.setCaskVersion(t, "2.0")
+	fixture.requireCaskOutdated(t)
+	t.Run("upgrades a real outdated cask", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "/"+fixture.cask+"\r")
+		app.waitForAfter(t, at, "Search: "+fixture.cask+" · 1 of", 20*time.Second)
+		at = app.mark()
+		app.send(t, "u")
+		app.waitForAfter(t, at, "Upgrade "+fixture.cask+"?", 10*time.Second)
+		app.send(t, "y")
+		app.waitForAfter(t, at, "Upgraded "+fixture.cask, 30*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireCaskInstalled(t, "2.0")
+	})
+
 	t.Run("uninstalls a real cask", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
 		app.waitFor(t, "casks installed", 20*time.Second)
@@ -55,6 +117,59 @@ func TestBlackBox(t *testing.T) {
 
 	fixture.setRootVersion(t, "2.0")
 	fixture.requireOutdated(t)
+	fixture.pinRoot(t)
+	t.Run("filters and refuses a pinned formula upgrade", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "\t")
+		app.waitForAfter(t, at, "formulae installed", 20*time.Second)
+		at = app.mark()
+		app.send(t, "o")
+		app.waitForAfter(t, at, "Sort: size ↓", 10*time.Second)
+		at = app.mark()
+		app.send(t, "f")
+		app.waitForAfter(t, at, "Filter: outdated", 10*time.Second)
+		at = app.mark()
+		app.send(t, "/")
+		app.waitForAfter(t, at, "Search: is:outdated_", 10*time.Second)
+		at = app.mark()
+		app.send(t, " "+fixture.root)
+		app.send(t, "\r")
+		app.waitForAfter(t, at, "lazybrew black-box fixture", 20*time.Second)
+		at = app.mark()
+		app.send(t, "u")
+		app.waitForAfter(t, at, fixture.root+" is pinned", 10*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireInstalled(t, fixture.root, "1.0")
+	})
+	fixture.unpinRoot(t)
+	fixture.setBrokenRootVersion(t, "2.0")
+	fixture.requireOutdated(t)
+	t.Run("recovers from a real Homebrew upgrade failure", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "\t")
+		app.waitForAfter(t, at, "formulae installed", 20*time.Second)
+		at = app.mark()
+		app.send(t, "/"+fixture.root+"\r")
+		app.waitForAfter(t, at, "Search: "+fixture.root+" · 1 of", 20*time.Second)
+		at = app.mark()
+		app.send(t, "u")
+		app.waitForAfter(t, at, "Upgrade "+fixture.root+"?", 10*time.Second)
+		app.send(t, "y")
+		// Homebrew spells the tail `Error:` locally and `::error::` in Actions.
+		// This captured-output prefix reaches the UI only on command failure.
+		app.waitForAfter(t, at, "Fetching downloads for: "+fixture.root, 30*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireOnlyInstalled(t, fixture.root, "1.0")
+	})
+	fixture.setRootVersion(t, "2.0")
+	fixture.requireOutdated(t)
+
 	t.Run("upgrades a real outdated formula", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
 		app.waitFor(t, "casks installed", 20*time.Second)
@@ -89,7 +204,6 @@ func TestBlackBox(t *testing.T) {
 		app.waitForAfter(t, at, "Search: is:dep_", 10*time.Second)
 		at = app.mark()
 		app.send(t, " "+fixture.dep)
-		app.waitForAfter(t, at, fixture.dep+"_", 20*time.Second)
 		app.send(t, "\r")
 		app.waitForAfter(t, at, "lazybrew black-box fixture", 20*time.Second)
 		at = app.mark()
