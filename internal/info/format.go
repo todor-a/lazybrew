@@ -309,6 +309,9 @@ type UsesFunc func(context.Context, brew.Package) ([]string, error)
 // would leave the pane showing an error for a package whose details loaded fine.
 func Details(loadInfo InfoFunc, loadUses UsesFunc) LoadFunc {
 	return func(ctx context.Context, pkg brew.Package) (string, error) {
+		if pkg.Untrusted && pkg.FullName != "" && pkg.Tap != "" {
+			return untrustedDetails(pkg), nil
+		}
 		raw, err := loadInfo(ctx, pkg)
 		if err != nil {
 			return "", err
@@ -321,4 +324,23 @@ func Details(loadInfo InfoFunc, loadUses UsesFunc) LoadFunc {
 		}
 		return Format(pkg, raw, dependents), nil
 	}
+}
+
+func untrustedDetails(pkg brew.Package) string {
+	kind := string(pkg.Kind)
+	rows := [][2]string{
+		{"Source", pkg.Tap},
+		{"Package", pkg.FullName},
+	}
+	lines := []string{"Untrusted " + kind, ""}
+	lines = append(lines, alignRows(rows)...)
+	lines = append(lines,
+		"Homebrew will not load or upgrade it.",
+		"",
+		"Trust permits this "+kind+"'s current and future Ruby definition to run as your user. Other tap items stay untrusted.",
+		"",
+		"Trust: brew trust --"+kind+" "+pkg.FullName,
+		"Undo: brew untrust --"+kind+" "+pkg.FullName,
+	)
+	return strings.Join(lines, "\n")
 }

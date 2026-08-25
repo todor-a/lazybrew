@@ -1260,7 +1260,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			listErr       error
 			outdated      []brew.OutdatedPackage
 			outdatedKnown bool
-			untrusted     []string
+			untrusted     []brew.UntrustedPackage
 		)
 		wg.Add(3)
 		go func() {
@@ -1349,17 +1349,19 @@ func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, know
 // matched by name against the rows exactly as markOutdated is. No Known twin:
 // nothing anywhere renders an assurance of trust, so absence of evidence
 // already renders as absence of the mark.
-func markUntrusted(packages []brew.Package, names []string) []brew.Package {
-	if len(names) == 0 {
+func markUntrusted(packages []brew.Package, identities []brew.UntrustedPackage) []brew.Package {
+	if len(identities) == 0 {
 		return packages
 	}
-	untrusted := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		untrusted[name] = struct{}{}
+	untrusted := make(map[string]brew.UntrustedPackage, len(identities))
+	for _, identity := range identities {
+		untrusted[identity.Name] = identity
 	}
 	for i := range packages {
-		if _, ok := untrusted[packages[i].Name]; ok {
+		if identity, ok := untrusted[packages[i].Name]; ok {
 			packages[i].Untrusted = true
+			packages[i].FullName = identity.FullName
+			packages[i].Tap = identity.Tap
 		}
 	}
 	return packages

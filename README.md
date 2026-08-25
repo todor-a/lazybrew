@@ -16,7 +16,7 @@
 - **Outdated, with the actual versions** — `↑` marks plus `12.24.4 → 12.24.5` right in the row, straight from `brew outdated`; pinned formulae show `P` instead.
 - **Size accounting** — every formula's installed size from one `du` pass over the Cellar, with the fleet total. Casks are deliberately unsized: their Caskroom entries lie, and lazybrew does not print numbers that are not sizes.
 - **A real table** — column headings with a sort cue; `o` cycles name ↑ → size ↓ → size ↑ → name ↓ per screen.
-- **Untrusted-tap marks** — `!` on packages whose third-party tap Homebrew refuses to load, with brew's own `brew trust` remedy shown in the info pane.
+- **Untrusted-tap guidance** — `!` marks packages Homebrew refuses to load; the info pane explains formula/cask trust scope and shows narrow `trust`/`untrust` commands without loading the definition.
 - **Removal verdicts** — the info pane shows what depends on a formula and whether it is safe to remove.
 - **Queue actions, keep browsing** — the list stays navigable while an uninstall or upgrade runs; confirm more actions and they queue up and run serially, shown live at the bottom of the info pane.
 - **Dependency X-ray** — formulae installed as dependencies are hidden by default; `a` reveals them.

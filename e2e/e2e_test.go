@@ -44,6 +44,23 @@ func TestBlackBox(t *testing.T) {
 	binary := buildApp(t)
 
 	fixture := installBrewFixture(t)
+	fixture.untrustFormulae(t)
+	t.Run("explains a real untrusted formula", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "\t")
+		app.waitForAfter(t, at, "formulae installed", 20*time.Second)
+		at = app.mark()
+		app.send(t, "/"+fixture.root+"\r")
+		app.waitForAfter(t, at, "Untrusted formula", 20*time.Second)
+		app.waitForAfter(t, at, "brew trust --formula", 20*time.Second)
+		app.waitForAfter(t, at, "brew untrust --formula", 20*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+	})
+	fixture.trustFormulae(t)
+
 	t.Run("refreshes and applies display controls", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
 		app.waitFor(t, "casks installed", 20*time.Second)

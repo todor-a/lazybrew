@@ -381,12 +381,13 @@ func TestUntrustedCommandVectorsAndFiltering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := configureFakeBrew(t, trustJSON+"\n", "", 0, false)
 			fakeBrewStdoutByArg(t, map[string]string{"--full-name": inventory})
-			names, err := New().Untrusted(context.Background(), tt.kind)
+			packages, err := New().Untrusted(context.Background(), tt.kind)
 			if err != nil {
 				t.Fatalf("Untrusted() error = %v", err)
 			}
-			if want := []string{"marked"}; !slices.Equal(names, want) {
-				t.Fatalf("Untrusted() = %#v, want %#v", names, want)
+			want := []UntrustedPackage{{Name: "marked", FullName: "other/tap/marked", Tap: "other/tap"}}
+			if !slices.Equal(packages, want) {
+				t.Fatalf("Untrusted() = %#v, want %#v", packages, want)
 			}
 			// Any order: the inventory and trust store reads are concurrent.
 			assertRecordedArgsAnyOrder(t, argsFile,

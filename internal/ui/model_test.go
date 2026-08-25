@@ -20,7 +20,7 @@ type fakeHomebrew struct {
 	packages     map[brew.Kind][]brew.Package
 	outdated     map[brew.Kind][]brew.OutdatedPackage
 	outdatedErr  error
-	untrusted    map[brew.Kind][]string
+	untrusted    map[brew.Kind][]brew.UntrustedPackage
 	untrustedErr error
 	err          error
 	listStarted  chan struct{}
@@ -75,11 +75,11 @@ func (f *fakeHomebrew) Outdated(_ context.Context, kind brew.Kind) ([]brew.Outda
 	return append([]brew.OutdatedPackage(nil), f.outdated[kind]...), nil
 }
 
-func (f *fakeHomebrew) Untrusted(_ context.Context, kind brew.Kind) ([]string, error) {
+func (f *fakeHomebrew) Untrusted(_ context.Context, kind brew.Kind) ([]brew.UntrustedPackage, error) {
 	if f.untrustedErr != nil {
 		return nil, f.untrustedErr
 	}
-	return append([]string(nil), f.untrusted[kind]...), nil
+	return append([]brew.UntrustedPackage(nil), f.untrusted[kind]...), nil
 }
 
 func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
@@ -2121,19 +2121,22 @@ func TestUntrustedMarksLandOnRows(t *testing.T) {
 		},
 		// "ghost" is a name the inventory never shows; harmless here, exactly as
 		// an outdated name for a dependency-only formula is.
-		untrusted: map[brew.Kind][]string{brew.Cask: {"Beta", "ghost"}},
+		untrusted: map[brew.Kind][]brew.UntrustedPackage{brew.Cask: {
+			{Name: "Beta", FullName: "other/tap/Beta", Tap: "other/tap"},
+			{Name: "ghost", FullName: "other/tap/ghost", Tap: "other/tap"},
+		}},
 	}
 	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
 
-	var got []bool
+	var got []brew.Package
 	for _, item := range m.list.Items() {
-		got = append(got, item.(packageItem).packageValue.Untrusted)
+		got = append(got, item.(packageItem).packageValue)
 	}
-	if !slices.Equal(got, []bool{false, true}) {
-		t.Fatalf("untrusted marks=%v, want only Beta marked", got)
+	if got[0].Untrusted || !got[1].Untrusted || got[1].FullName != "other/tap/Beta" || got[1].Tap != "other/tap" {
+		t.Fatalf("untrusted rows=%+v, want only Beta marked with full identity", got)
 	}
 }
 
@@ -2144,7 +2147,9 @@ func TestAFailedUntrustedReadStillLoadsAnUnmarkedList(t *testing.T) {
 		packages: map[brew.Kind][]brew.Package{
 			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 		},
-		untrusted:    map[brew.Kind][]string{brew.Cask: {"Alpha"}},
+		untrusted: map[brew.Kind][]brew.UntrustedPackage{brew.Cask: {
+			{Name: "Alpha", FullName: "other/tap/Alpha", Tap: "other/tap"},
+		}},
 		untrustedErr: errors.New("Unknown command: trust"),
 	}
 	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())

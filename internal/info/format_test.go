@@ -250,6 +250,72 @@ func TestDetailsPropagatesInfoFailure(t *testing.T) {
 	}
 }
 
+func TestDetailsExplainsAnUntrustedFormulaWithoutLoadingIt(t *testing.T) {
+	calls := 0
+	loadInfo := func(context.Context, brew.Package) (string, error) {
+		calls++
+		return "", errors.New("must not load an untrusted formula")
+	}
+	loadUses := func(context.Context, brew.Package) ([]string, error) {
+		calls++
+		return nil, errors.New("must not inspect dependents for an untrusted formula")
+	}
+	pkg := brew.Package{
+		Name: "codeburn", Version: "0.9.9", Kind: brew.Formula,
+		Untrusted: true, FullName: "getagentseal/codeburn/codeburn", Tap: "getagentseal/codeburn",
+	}
+
+	got, err := Details(loadInfo, loadUses)(context.Background(), pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `Untrusted formula
+
+Source     getagentseal/codeburn
+Package    getagentseal/codeburn/codeburn
+Homebrew will not load or upgrade it.
+
+Trust permits this formula's current and future Ruby definition to run as your user. Other tap items stay untrusted.
+
+Trust: brew trust --formula getagentseal/codeburn/codeburn
+Undo: brew untrust --formula getagentseal/codeburn/codeburn`
+	if got != want || calls != 0 {
+		t.Fatalf("Details() = %q, calls=%d; want %q and no calls", got, calls, want)
+	}
+}
+
+func TestDetailsExplainsAnUntrustedCaskWithoutLoadingIt(t *testing.T) {
+	loadInfo := func(context.Context, brew.Package) (string, error) {
+		t.Fatal("loaded an untrusted cask")
+		return "", nil
+	}
+	loadUses := func(context.Context, brew.Package) ([]string, error) {
+		t.Fatal("inspected dependents for an untrusted cask")
+		return nil, nil
+	}
+	pkg := brew.Package{
+		Name: "widget", Kind: brew.Cask, Untrusted: true,
+		FullName: "vendor/tap/widget", Tap: "vendor/tap",
+	}
+
+	got, err := Details(loadInfo, loadUses)(context.Background(), pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Untrusted cask",
+		"Source     vendor/tap",
+		"Package    vendor/tap/widget",
+		"Trust permits this cask's current and future Ruby definition to run as your user.",
+		"brew trust --cask vendor/tap/widget",
+		"brew untrust --cask vendor/tap/widget",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Details() missing %q in:\n%s", want, got)
+		}
+	}
+}
+
 // A failed `brew outdated` read must not become a freshness assurance. This is
 // the same restraint the dependents row already follows: absence of evidence is
 // reported as absence, not as good news.

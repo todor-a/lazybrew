@@ -47,8 +47,10 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 | `outdated` **[REWRITE ADDITION]** | Whether `brew outdated` reports the package for its kind. False when that read failed or was never made. |
 | `dependency` **[REWRITE ADDITION]** | True when Homebrew reports the formula as not installed on request. Always false for a cask. Display data, not identity, exactly like `version`. |
 | `pinned` **[REWRITE ADDITION]** | True when `brew list --pinned` reports the formula. Always false for a cask and never part of identity or argv. |
+| `untrusted` **[REWRITE ADDITION]** | True when Homebrew's trust store covers neither the third-party package nor its tap. False is never rendered as an assurance of trust. |
+| `fullName` / `tap` **[REWRITE ADDITION]** | The `user/repository/name` and `user/repository` spellings retained only for an untrusted row's guidance. Display data; neither reaches argv. |
 
-Package identity and the package-info cache key are `(kind, name)`. Version, `outdated`, `dependency`, and `pinned` are display data, not identity.
+Package identity and the package-info cache key are `(kind, name)`. Version, `outdated`, `dependency`, `pinned`, `untrusted`, `fullName`, and `tap` are display data, not identity.
 
 **[REWRITE ADDITION]** `outdated` replaces nothing; it is a fourth field on a value that previously carried three. It is display data specifically: it stays out of the info cache key, out of the search filter target, and out of every argv, so adding it cannot change which panel is cached, which rows a query matches, or what any command runs. It is set from the section 5 outdated read at list time and is never derived from comparing two version strings.
 
@@ -163,6 +165,8 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 | List | formula | `brew`, `list`, `--formula` |
 | Dependency set **[REWRITE ADDITION]** | formula | `brew`, `list`, `--formula`, `--no-installed-on-request` |
 | Pinned set **[REWRITE ADDITION]** | formula | `brew`, `list`, `--pinned` |
+| Full-name inventory **[REWRITE ADDITION]** | cask / formula | `brew`, `list`, `<kind-flag>`, `--full-name` |
+| Trust store **[REWRITE ADDITION]** | — | `brew`, `trust`, `--json`, `v1` |
 | Package roots **[REWRITE ADDITION]** | — | `brew`, `--cellar` and `brew`, `--caskroom` |
 | Info | cask | `brew`, `info`, `--cask`, `<name>` |
 | Info | formula | `brew`, `info`, `--formula`, `<name>` |
@@ -179,6 +183,8 @@ The terminal-cell-width mask is a normative **[REWRITE ADDITION]** chosen to use
 `--greedy` must never be added. Homebrew's default set is already its own verdict about what `brew upgrade` would act on, and it deliberately excludes auto-updating casks it will not touch. Measured on the development machine: `brew outdated --cask --quiet` returns exactly `postman`, while adding `--greedy` returns 14 names including `firefox` — an `auto_updates` cask installed at 153.0.4 against Homebrew's 154.0 that `brew upgrade` will not touch. Marking firefox would be exactly the false claim the section 6 restraint forbids, so the flag is prohibited rather than merely unused.
 
 Homebrew may spell a third-party outdated formula as `user/tap/name` while the installed inventory spells it `name`. The outdated parser keeps only the final token for its display-only match key; that normalized name never reaches argv.
+
+**[REWRITE ADDITION]** The full-name inventory and trust-store reads run concurrently and annotate, never replace, the ordinary inventory. A tap-qualified package is untrusted when neither its exact package entry nor its two-segment tap entry appears in the kind-specific store. Retain all three identity spellings on that row for display. A failed trust read—including Homebrew versions without `brew trust`—absorbs into no marks and no claim that any package is trusted.
 
 **[REWRITE ADDITION]** Every command this adapter starts inherits `HOMEBREW_NO_AUTO_UPDATE=1`, appended to the environment rather than substituted for it.
 
@@ -351,6 +357,23 @@ Rows appear only when their value is available, in this order:
 Labels are padded to a fixed width equal to the longest label, not to the longest label present in a given panel, so the value column lands on the same cell for every package and does not shift as the selection moves.
 
 The verdict row is `Safe to remove.` when a formula has no installed dependents, or `Removing this breaks <n> installed formula(e).` when it does.
+
+**[REWRITE ADDITION]** An untrusted row does not call `brew info` or `brew uses`: Homebrew is already known to refuse the definition, and rendering its raw wrapped error spends the pane without explaining the decision. It renders this compact, soft-wrapped guidance instead:
+
+```text
+Untrusted <formula|cask>
+
+Source     <user/repository>
+Package    <user/repository/name>
+Homebrew will not load or upgrade it.
+
+Trust permits this <formula|cask>'s current and future Ruby definition to run as your user. Other tap items stay untrusted.
+
+Trust: brew trust --<formula|cask> <user/repository/name>
+Undo: brew untrust --<formula|cask> <user/repository/name>
+```
+
+Both commands must land within the existing non-scrollable info viewport at the tested 120×24 E2E size. Trust is never performed by lazybrew in this phase; these full-name values remain display-only. Package-level trust is deliberately shown instead of whole-tap trust because the latter permits every current and future formula, cask, and external command in that tap to load.
 
 Three deliberate restraints, because this pane feeds a destructive action:
 
@@ -1034,7 +1057,7 @@ Parity and rewrite are complete only when all of the following are true:
 | Process cleanup | Integration-test a fake brew tree that ignores SIGTERM, holds descriptors, survives where controllable, and simulates permission-denied/uninspectable members. | Direct brew child is `Wait`-reaped exactly once; SIGTERM then bounded SIGKILL/observation; fixture descendants are observed exited; owned goroutines/FDS close; exact paths are removed; survivor/uninspectable cases return explicit cleanup failure; cleanup is idempotent. |
 | TTY/lifecycle | PTY and non-PTY subprocess tests cover normal quit, runtime failure fallback, ctrl+c/SIGINT, SIGTERM, and quit during active list, info, starting uninstall, and active uninstall. | Exact stderr and exit codes 0, 1, 130, or 143; terminal restored; list/info result-reap messages and uninstall terminal result are awaited; no owned command/goroutine/descriptor is abandoned; cleanup failures are surfaced. |
 | Quiescence | Model/runtime test reaches idle after list/info/uninstall completion and then observes commands/redraw triggers. | No 100 ms or other polling timer exists; with no active spinner/command, no tick is scheduled, and a stale tick neither mutates state nor schedules another. |
-| End-to-end Homebrew | PTY-drive the built binary against real Homebrew and a temporary trusted `lazybrew/e2e` tap containing a local cask, an on-request formula, and its dependency. Run on stable Homebrew for macOS ARM and Intel, plus Homebrew `main` on a schedule. | Non-TTY startup refuses cleanly; `q`, Ctrl+C, and SIGTERM exit 0, 130, and 143; theme, sort, filter, and refresh controls land; the cask upgrades and uninstalls; a pinned outdated formula refuses upgrade; a real formula failure preserves 1.0 and restores controls; the repaired formula upgrades to 2.0; dependencies are revealed; the formula uninstalls; and cleanup removes every fixture. |
+| End-to-end Homebrew | PTY-drive the built binary against real Homebrew and a temporary `lazybrew/e2e` tap containing a local cask, an on-request formula, and its dependency. Run on stable Homebrew for macOS ARM and Intel, plus Homebrew `main` on a schedule. | Non-TTY startup refuses cleanly; `q`, Ctrl+C, and SIGTERM exit 0, 130, and 143; the deliberately untrusted formula is explained without loading and narrow fixture trust is restored; theme, sort, filter, and refresh controls land; the cask upgrades and uninstalls; a pinned outdated formula refuses upgrade; a real formula failure preserves 1.0 and restores controls; the repaired formula upgrades to 2.0; dependencies are revealed; the formula uninstalls; and cleanup removes every fixture. |
 | End-to-end authentication | Keep three boundaries distinct: pure verifier fixtures as above; mandatory Darwin kernel/Security.framework integration with controlled processes; and a capability-gated PTY test in which fake Homebrew invokes real `/usr/bin/sudo -A` only when the host permits non-destructive sudo askpass testing. | Pure fixtures prove only verifier logic, Darwin integration proves kernel acquisition/fail-closed behavior, and the real-sudo positive path proves on-demand dialog/masking/fresh retry/submission when capability is available; skipping that capability-gated positive test does not replace either mandatory lower layer. |
 | Clean cutover | Repository check after implementation. | Go tests pass and no Python source/test/bytecode/helper artifact remains under `lazybrew/`. |
 

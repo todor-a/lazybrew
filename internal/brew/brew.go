@@ -51,13 +51,26 @@ type Package struct {
 	// data, not identity, exactly like Outdated: it is outside the info-cache
 	// key, the filter value, and every argv.
 	Untrusted bool
+	// FullName and Tap retain the trust decision's source identity for display.
+	// They are populated only for an untrusted package and never reach argv.
+	FullName string
+	Tap      string
+}
+
+// UntrustedPackage is the display identity Homebrew refuses to load. FullName
+// and Tap come only from `brew list --full-name`; none of these values reach
+// argv.
+type UntrustedPackage struct {
+	Name     string
+	FullName string
+	Tap      string
 }
 
 // Homebrew exposes the read-only operations used by the application.
 type Homebrew interface {
 	List(context.Context, Kind) ([]Package, error)
 	Outdated(context.Context, Kind) ([]OutdatedPackage, error)
-	Untrusted(context.Context, Kind) ([]string, error)
+	Untrusted(context.Context, Kind) ([]UntrustedPackage, error)
 	Info(context.Context, Package) (string, error)
 	Uses(context.Context, Package) ([]string, error)
 	Sizes(context.Context) (Sizes, error)
@@ -271,7 +284,7 @@ type trustStore struct {
 // whole call fails with it. The caller absorbs that exactly as it absorbs a
 // failed outdated read, so an old brew carries no marks rather than a claim
 // either way.
-func (client) Untrusted(ctx context.Context, kind Kind) ([]string, error) {
+func (client) Untrusted(ctx context.Context, kind Kind) ([]UntrustedPackage, error) {
 	flag, err := kindFlag(kind)
 	if err != nil {
 		return nil, err
@@ -305,18 +318,18 @@ func (client) Untrusted(ctx context.Context, kind Kind) ([]string, error) {
 	if err := json.Unmarshal(trustStdout, &store); err != nil {
 		return nil, err
 	}
-	return untrustedNames(string(listStdout), kind, store), nil
+	return untrustedPackages(string(listStdout), kind, store), nil
 }
 
-// untrustedNames filters the tap-qualified inventory spellings down to the
-// short names of untrusted packages. One set holds both trusted taps and
-// trusted packages: a tap key has two segments and a package key three, so the
-// two vocabularies cannot collide.
+// untrustedPackages filters the tap-qualified inventory spellings down to the
+// display identities of untrusted packages. One set holds both trusted taps
+// and trusted packages: a tap key has two segments and a package key three, so
+// the two vocabularies cannot collide.
 //
 // SECURITY: the names returned are only ever used as marker-map keys, matched
 // against names that came from `brew list`. They never reach an argv, exactly
 // like parseSizes' keys, so this path needs no second validator.
-func untrustedNames(output string, kind Kind, store trustStore) []string {
+func untrustedPackages(output string, kind Kind, store trustStore) []UntrustedPackage {
 	trustedPackages := store.Formulae
 	if kind == Cask {
 		trustedPackages = store.Casks
@@ -329,7 +342,7 @@ func untrustedNames(output string, kind Kind, store trustStore) []string {
 		trusted[name] = struct{}{}
 	}
 
-	var names []string
+	var packages []UntrustedPackage
 	for _, fullName := range parseNames(output) {
 		// user/repo/name. A bare spelling is an official-tap package, and a
 		// malformed one is not evidence of anything, so neither is marked.
@@ -343,9 +356,13 @@ func untrustedNames(output string, kind Kind, store trustStore) []string {
 		if _, ok := trusted[fullName]; ok {
 			continue
 		}
-		names = append(names, parts[2])
+		packages = append(packages, UntrustedPackage{
+			Name:     parts[2],
+			FullName: fullName,
+			Tap:      parts[0] + "/" + parts[1],
+		})
 	}
-	return names
+	return packages
 }
 
 func (client) Info(ctx context.Context, pkg Package) (string, error) {

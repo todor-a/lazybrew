@@ -384,6 +384,19 @@ func (f *brewFixture) unpinRoot(t *testing.T) {
 	f.mustRun(t, "unpin", f.root)
 }
 
+func (f *brewFixture) untrustFormulae(t *testing.T) {
+	t.Helper()
+	f.mustRun(t, "untrust", "--tap", f.tap)
+	// Keep the unrelated cask scenario unchanged while both formulae exercise
+	// the package-level trust path.
+	f.mustRun(t, "trust", "--cask", f.tap+"/"+f.cask)
+}
+
+func (f *brewFixture) trustFormulae(t *testing.T) {
+	t.Helper()
+	f.mustRun(t, "trust", "--formula", f.tap+"/"+f.root, f.tap+"/"+f.dep)
+}
+
 func (f *brewFixture) cleanupOldRoot(t *testing.T) {
 	t.Helper()
 	f.mustRun(t, "cleanup", "--prune=all", f.root)
