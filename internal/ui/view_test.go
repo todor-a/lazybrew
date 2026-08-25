@@ -2,6 +2,7 @@ package ui
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -133,6 +134,59 @@ func TestTrustReviewIsACenteredPackageLevelConfirmation(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("trust review missing %q\n%s", want, view)
 		}
+	}
+}
+
+func TestUpgradeAllConfirmationNamesTheActiveScreenAndExclusions(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	packages := []brew.Package{
+		{Name: "Alpha", Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true},
+		{Name: "patchy", Version: "1.0.0", LatestVersion: "1.0.1", Kind: brew.Cask},
+		{Name: "lazybrew", Version: "0.4.0", LatestVersion: "0.5.0", Kind: brew.Cask, Outdated: true},
+	}
+	m.listCache[brew.Cask] = packages
+	m.setPackages(packages, 0)
+	m.Update(textKey("U"))
+
+	view := strings.Join(strippedLines(m), "\n")
+	for _, want := range []string{
+		"Confirm upgrade all",
+		"Upgrade 2 apps?",
+		"Every Homebrew-reported update on this screen.",
+		"Updates below the display threshold are included.",
+		"Alpha  1.0 → 2.0",
+		"patchy  1.0.0 → 1.0.1",
+		"lazybrew itself is excluded while running.",
+		"y: confirm  other: cancel",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("upgrade-all confirmation missing %q\n%s", want, view)
+		}
+	}
+}
+
+func TestUpgradeAllConfirmationSummarizesUpdatesThatDoNotFit(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	packages := make([]brew.Package, 8)
+	for i := range packages {
+		packages[i] = brew.Package{
+			Name: "package-" + strconv.Itoa(i+1), Version: "1.0", LatestVersion: "2.0", Kind: brew.Cask, Outdated: true,
+		}
+	}
+	m.listCache[brew.Cask] = packages
+	m.setPackages(packages, 0)
+	m.Update(textKey("U"))
+
+	view := strings.Join(strippedLines(m), "\n")
+	for _, want := range []string{"package-1  1.0 → 2.0", "package-4  1.0 → 2.0", "… +4 more"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("upgrade-all preview missing %q\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "package-5  1.0 → 2.0") {
+		t.Fatalf("upgrade-all preview overflowed its declared limit\n%s", view)
 	}
 }
 
@@ -530,10 +584,10 @@ func TestSearchFooterTeachesTheFilterVocabulary(t *testing.T) {
 
 func TestFooterListsEveryNormalKey(t *testing.T) {
 	m, _ := newTestModel(t)
-	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	m.Update(tea.WindowSizeMsg{Width: 160, Height: 20})
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Filter: f · Sort: o · Theme: n · Refresh: r · Quit: q"
+	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · Upgrade all: U · All: a · Filter: f · Sort: o · Theme: n · Refresh: r · Quit: q"
 	if footer != want {
 		t.Fatalf("footer=%q, want %q", footer, want)
 	}
@@ -921,7 +975,7 @@ func backgroundActiveAtTrailingBlanks(row, backgroundParam string) (armed, hasPa
 func TestFooterKeepsItsBackgroundAcrossTheWholeRow(t *testing.T) {
 	m, _ := newTestModel(t)
 	// Wide enough that the footer does not fill the row, so there is padding.
-	m.Update(tea.WindowSizeMsg{Width: 130, Height: 12})
+	m.Update(tea.WindowSizeMsg{Width: 180, Height: 12})
 
 	bright := -1
 	for i, candidate := range themes {

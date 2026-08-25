@@ -94,6 +94,19 @@ func TestBlackBox(t *testing.T) {
 
 	fixture.setCaskVersion(t, "2.0")
 	fixture.requireCaskOutdated(t)
+	t.Run("reviews and cancels upgrade all for the apps screen", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "U")
+		app.waitForAfter(t, at, "Confirm upgrade all", 10*time.Second)
+		app.waitForAfter(t, at, "Every Homebrew-reported update on this screen.", 10*time.Second)
+		app.send(t, "n")
+		app.waitForAfter(t, at, "Upgrade all cancelled", 10*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireCaskInstalled(t, "1.0")
+	})
 	t.Run("upgrades a real outdated cask", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
 		app.waitFor(t, "casks installed", 20*time.Second)
@@ -147,6 +160,22 @@ func TestBlackBox(t *testing.T) {
 
 	fixture.setRootVersion(t, "2.0")
 	fixture.requireOutdated(t)
+	t.Run("reviews and cancels upgrade all for the formulae screen", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "\t")
+		app.waitForAfter(t, at, "formulae installed", 20*time.Second)
+		at = app.mark()
+		app.send(t, "U")
+		app.waitForAfter(t, at, "Confirm upgrade all", 10*time.Second)
+		app.waitForAfter(t, at, "formulae?", 10*time.Second)
+		app.send(t, "n")
+		app.waitForAfter(t, at, "Upgrade all cancelled", 10*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+		fixture.requireInstalled(t, fixture.root, "1.0")
+	})
 	fixture.pinRoot(t)
 	t.Run("filters and refuses a pinned formula upgrade", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)

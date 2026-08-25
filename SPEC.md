@@ -21,7 +21,7 @@ lazybrew is a macOS terminal UI for inspecting installed Homebrew casks and expl
 ### Non-goals
 
 - Supporting Linux, Windows, package managers other than Homebrew, or remote Homebrew installations.
-- Installing, pinning, or otherwise mutating packages except uninstalling or upgrading the explicitly confirmed package. **[REWRITE ADDITION]** Upgrading is the only package mutation besides uninstalling; both go through one confirmation, one snapshot, and one privileged path. Package-level `brew trust` changes only the current user's Homebrew trust store through its separate review in section 4. Reporting which packages `brew outdated` names remains a read.
+- Installing, pinning, or otherwise mutating packages except uninstalling a confirmed package or upgrading a confirmed package/batch. **[REWRITE ADDITION]** Upgrade-all is the immutable active-screen batch in section 9B; every item still crosses the same privileged path serially. Package-level `brew trust` changes only the current user's Homebrew trust store through its separate review in section 4. Reporting which packages `brew outdated` names remains a read.
 - Listing formulae installed only as dependencies.
 - **[REWRITE ADDITION]** Installing or pinning dependency-only formulae. Replaces the non-goal `Listing formulae installed only as dependencies.`, which forbade the only view that can answer what is consuming disk: on the measured machine the dependency-only set is 180 of 304 installed formulae and holds 7 of the 12 largest packages, including the single largest at 1.5 GB. Dependency-only formulae are now listed behind an explicit toggle that is off at startup (section 4), so the curated default view is unchanged.
 
@@ -98,7 +98,8 @@ Key handling is mode-first. A modal mode receives ordinary keys before the under
 | `/`, `s`, `S` | Enter search-edit mode with the current query. | **[CURRENT/PARITY]** |
 | `tab` | Switch cask ↔ formula, reset selection and scroll offset to zero, load that kind from the section 8 list cache or from `brew list` on a miss, then target its selected package for info. The query remains active, so the target list arrives already filtered. | **[CURRENT/PARITY]** plus cache **[REWRITE ADDITION]** |
 | `d`, `D` | Open the **uninstall** confirmation for the selected package if one exists and the safety-fit check passes. With no selected package, do nothing. | **[CURRENT/PARITY]** behaviour, **[REWRITE ADDITION]** key |
-| `u`, `U` | Open the **upgrade** confirmation, but only for a package `brew outdated` reports. On a package it does not report, start nothing at all — no confirmation, no snapshot, no job — and set the ordinary status `<name> is up to date`. With no selected package, do nothing. | **[REWRITE ADDITION]** |
+| `u` | Open the selected-package **upgrade** confirmation, but only for a package `brew outdated` reports and the display threshold marks. On another package, start nothing and explain pinned/current/threshold state. | **[REWRITE ADDITION]** |
+| `U` | Snapshot and confirm every eligible Homebrew-reported update in the active Apps or Formulae inventory, then run it serially as section 9B specifies. The current query, dependency toggle, and display threshold do not narrow the batch. | **[REWRITE ADDITION]** |
 | `t`, `T` | On an untrusted row, open the package trust review described below. On every other row, do nothing and omit the binding from the footer. | **[REWRITE ADDITION]** |
 | `n`, `N` | Cycle to the next theme and set status to `Theme: <name>`. | **[CURRENT/PARITY]** key reassignment |
 | `r`, `R` | Perform the refresh contract in section 8. | **[CURRENT/PARITY]** |
@@ -116,7 +117,7 @@ Search is case-insensitive substring matching against `name + " " + version + " 
 
 | Keys | Result |
 |---|---|
-| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `t`, `n`, `r`, `s`, `/`, and **[REWRITE ADDITION]** `d`, `D`, `o`, `O` have no global meaning while editing. |
+| Any printable text delivered by a `tea.KeyPressMsg` | Append the text to the query. `q`, `Q`, `u`, `U`, `t`, `n`, `r`, `s`, `/`, and **[REWRITE ADDITION]** `d`, `D`, `o`, `O` have no global meaning while editing. |
 | `backspace`, `ctrl+h` | Remove the final query rune if one exists. Match a Bubble Tea v2 `KeyBackspace`/`backspace` event; also accept `ctrl+h` if an enhanced keyboard protocol delivers it distinctly. |
 | `enter` | Accept the query, leave it active, and return to normal mode. |
 | `tab` | **[REWRITE ADDITION]** Perform the normal-mode `tab` kind switch and return to normal mode. Parity ignored `tab` here, which made the advertised switch key silently dead while a query was being typed. Search mode is left before the load starts rather than when its result lands, so the mode change is visible immediately; the query is preserved and the target list arrives filtered. |
@@ -131,8 +132,8 @@ While editing, status is exactly `Search: <query>_`. Outside editing, the normal
 
 | Keys | Result |
 |---|---|
-| lowercase `y` only | Confirm the immutable package snapshot and start uninstall setup. |
-| Every other ordinary key, including uppercase `Y`, `q`, `Q`, `enter`, and `esc` | Close the dialog, run no command, and set priority status to `Uninstall cancelled`. |
+| lowercase `y` only | Confirm the immutable selected-package snapshot or upgrade-all batch and start its first operation. |
+| Every other ordinary key, including uppercase `Y`, `q`, `Q`, `enter`, and `esc` | Close the dialog, run no command, and set the operation-specific cancelled status. |
 
 **[CURRENT/PARITY] Lowercase-only confirmation is mandatory. Uppercase `Y` must cancel.** Bubble Tea key handling must compare the exact key text to `y`; it must not use a case-insensitive binding.
 
@@ -298,7 +299,7 @@ Do not use Huh or another modal package. `View` is pure: it renders state and mu
 6. One status row.
 7. One footer/help row.
 
-The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: n | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. On an untrusted row, insert `Review trust: t` immediately after `Search: /`; its exact 30-cell minimum-width prefix is `Search: / | Review trust: t | `, so the action remains discoverable where the info pane is absent.
+The normal footer's exact logical string is `Search: / | Switch: tab | Uninstall: d | Upgrade: u | Upgrade all: U | All: a | Sort: o | Theme: n | Refresh: r | Quit: q`. Render that string through the mode keymap; Bubbles help must not substitute shorter or alternate labels. On an untrusted row, insert `Review trust: t` immediately after `Search: /`; its exact 30-cell minimum-width prefix is `Search: / | Review trust: t | `, so the action remains discoverable where the info pane is absent.
 
 **[REWRITE ADDITION]** The action leads and the key answers it, joined by ` | `, replacing parity's key-first `<key> <label>` pairs separated by two spaces. A footer is read by someone looking for a verb, not by someone scanning single letters. `Search:` advertises `/` alone; `s` and `S` still work and are still bound, they are simply not spelled out.
 
@@ -306,7 +307,7 @@ The label occupies each binding's help-key slot and the keystroke its descriptio
 
 The footer is two-tone: the action in the footer role, the keystroke bold, the separator faint. Every segment carries the complete role rather than relying on an enclosing style, and the trailing pad is rendered through that role too. A single enclosing style over pre-styled segments ends its own background at the first inner reset, which is visible as a bare strip on any theme whose footer has a background.
 
-Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `Search: / | Switch: tab | Unin`: the clip falls inside `Uninstall:`. **[REWRITE ADDITION]** Rebinding uninstall to `d` and adding `Upgrade: u` and `All: a` left this prefix untouched, because `Uninstall:` stayed third; that is the constraint the ordering exists to satisfy. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
+Every footer is ANSI-aware clipped, never reworded, to the interior width. At the supported 32-column outer width, the interior is 30 cells and the normal footer content is the first 30 cells, exactly `Search: / | Switch: tab | Unin`: the clip falls inside `Uninstall:`. **[REWRITE ADDITION]** Rebinding uninstall to `d` and adding `Upgrade: u`, `Upgrade all: U`, and `All: a` left this prefix untouched, because `Uninstall:` stayed third; that is the constraint the ordering exists to satisfy. Structural view tests must compare the ANSI-stripped cell sequence and width, not merely search for help labels.
 
 Package rows render a selection marker, a freshness cell, name, kind, and optional version. **[REWRITE ADDITION]** The row shape is ` <marker><freshness> <name-column> <kind>[ <version>]`, where the marker is `>` only for the selected row and `<freshness>` is one fixed cell holding `P` for a pinned formula, `↑` for another package `brew outdated` reports, and a space otherwise. This replaces the earlier ` <marker> <name-column> <kind>[ <version>]`, which had no cell for the outdated verdict. The name column is at least 8 and at most 30 cells when space permits. ANSI-aware clipping must keep every row inside its assigned pane and must never overwrite a divider or border.
 
@@ -591,7 +592,7 @@ The key, priority-status, and footer contracts while a list command is active ar
 |---|---|---|---|
 | Startup cask load | `Loading casks...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Kind-switch load | `Loading casks...` or `Loading formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
-| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: n | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
+| Cached kind switch | none; no command runs | `Search: / | Switch: tab | Uninstall: d | Upgrade: u | Upgrade all: U | All: a | Sort: o | Theme: n | Refresh: r | Quit: q` | **[REWRITE ADDITION]** No load state is entered, so normal mode keeps every ordinary key. |
 | User refresh | `Refreshing casks...` or `Refreshing formulae...` | `Quit: q` | `q` or `Q` enters supervised quitting; every other ordinary key is ignored. |
 | Post-uninstall reload | `Reloading casks...` or `Reloading formulae...` | `Uninstall in progress; controls disabled` | Every ordinary key, including `q` and `Q`, is ignored because destructive transaction completion is pending. |
 
@@ -601,7 +602,7 @@ The key, priority-status, and footer contracts while a list command is active ar
 
 ### Immutable confirmation
 
-**[CURRENT/PARITY]** Pressing `u` or `U` copies the selected package's name, version, and kind into an immutable confirmation snapshot. The dialog and eventual argv use this snapshot. Later filtering, list results, resize, or selection state must never alter the target.
+**[CURRENT/PARITY]** Pressing `d` or lowercase `u` copies the selected package's name, version, and kind into an immutable confirmation snapshot. Uppercase `U` instead copies the complete section 9B batch. The dialog and every eventual argv use only those snapshots; later filtering, list results, resize, or selection state must never retarget them.
 
 Confirmation state is cleared before the starting-uninstall transition is committed. A repeated key cannot confirm twice. Only one uninstall job may exist.
 
@@ -689,7 +690,7 @@ The fit check measures the longest string of **both** verb sets and both confirm
 
 ### Keys, and two deviations from this design
 
-Uninstall moved from `u` to `d`; `u` starts an upgrade; the dependency toggle moved from `d` to `a`. That is the first deviation: this section originally specified `g` for upgrade. The footer became `Search: / | Switch: tab | Uninstall: d | Upgrade: u | All: a | Sort: o | Theme: n | Refresh: r | Quit: q`, and the section 6 exact 30-cell prefix at width 32 is unchanged, because `Uninstall:` stayed third.
+Uninstall moved from `u` to `d`; lowercase `u` starts a selected upgrade; uppercase `U` starts section 9B's active-screen batch; the dependency toggle moved from `d` to `a`. The footer is `Search: / | Switch: tab | Uninstall: d | Upgrade: u | Upgrade all: U | All: a | Sort: o | Theme: n | Refresh: r | Quit: q`, and the section 6 exact 30-cell prefix at width 32 is unchanged because `Uninstall:` stayed third.
 
 `u` on a package that `brew outdated` does not report starts nothing at all: no confirmation, no snapshot, no job. It sets the ordinary status `<name> is up to date`. The privileged machinery stays unreachable for an operation that would be a no-op, and the section 6 freshness cell is exactly the affordance that tells the user which rows `u` acts on.
 
@@ -706,6 +707,30 @@ The pairing rule is unchanged and is what makes the shared site safe: either ver
 ### What was not done
 
 The capability-gated real-`sudo` positive test still exercises `brew uninstall` against a fixture tree. Pointing it at `brew upgrade` would mutate a package the test cannot restore, so upgrade's privileged path is covered by the same fake-job and seam-override tests as uninstall, plus the argv pinning above, and not by a real privileged upgrade. Driven manually to the confirmation and cancelled there, for the same reason.
+
+## 9B. Upgrade all on the active screen
+
+**[REWRITE ADDITION]** Uppercase `U` is a distinct active-screen batch action; it can never alias lowercase `u`. It reads the retained, unfiltered inventory for the active Apps or Formulae tab, so a search, `is:` filter, sort, or hidden dependency row cannot silently change the set. A formula batch may therefore include dependency formulae that the default screen hides. The other tab is never included.
+
+Eligibility is Homebrew's complete reported outdated set, identified by the retained offered version even when the display threshold suppresses the `↑` mark. Exclude pinned and untrusted packages, packages with no Homebrew offer, and the running `lazybrew` cask. If lazybrew is the only candidate, report `Only lazybrew is outdated; upgrade it after quitting`; otherwise an empty set reports `No apps to upgrade` or `No formulae to upgrade`.
+
+The centered confirmation contains:
+
+- `Confirm upgrade all`
+- `Upgrade <n> apps?` or `Upgrade <n> formulae?`
+- `Every Homebrew-reported update on this screen.`
+- `Updates below the display threshold are included.`
+- one `<name>  <installed> → <offered>` row per update that fits; reserve the last available preview row for `… +<n> more` when the immutable batch is larger than the terminal
+- `lazybrew itself is excluded while running.` only when applicable
+- `y: confirm  other: cancel`
+
+The complete ordered package values are copied before the modal opens. The modal and every package's existing confirmation/password/progress strings must fit before opening and again on lowercase `y`; a resize must cancel or stop before the first queued package that no longer fits. Every other key cancels with `Upgrade all cancelled` and starts nothing.
+
+Lowercase `y` starts the first immutable package and places the remainder on the existing FIFO operation queue as ordinary `Upgrade` entries. No new brew operation or argv builder exists: every item crosses `brew.PrepareCommand` independently, and the existing runner keeps mutations strictly serial. The first start failure, command failure, authentication failure, cancellation, cleanup failure, or terminal-safety failure drops every remaining entry. Partial outcomes append `<completed> of <total> upgraded` before the existing `<n> queued dropped` receipt.
+
+While this batch is active, manual `d`, `u`, and `U` requests are ignored and absent from the operation footer. Browsing and the existing pure display controls remain available, but no post-confirmation operation can enlarge or retarget the immutable set.
+
+When every item succeeds, invalidate shared info/list/size state once, reload both cask and formula inventories concurrently, persist both, and report `Upgraded <n> packages`. A reload failure is reported as failure plus `<n> of <n> upgraded`; it never becomes a false success.
 
 ## 10. On-demand administrator password and retry
 
@@ -1066,6 +1091,7 @@ Parity and rewrite are complete only when all of the following are true:
 | Latest-only info | Controlled fake load function completes active/pending requests in adversarial order, including completed-not-handled revisit, refresh during flight, and A active → B pending → A reselected. | One active/one latest pending; current-generation cache only; stale result never renders/caches; after A completes in the A→B→A case, B never starts. |
 | Refresh/list loading | Model plus fake Homebrew tests cover every section 8 row, success/error, filtered query, fewer rows, and in-flight old info. **[REWRITE ADDITION]** Plus: marks survive a cached kind switch with no extra list call; a failed outdated read yields a successful, retained, unmarked list; an outdated name the inventory never shows marks nothing. | Exact status/footer/key behavior, cache invalidation, list/status result, selection clamp, and fresh info request; marks are on the retained value; a failed outdated read changes neither status nor retention. |
 | Confirmation | Model/view tests for no selection, immutable snapshot, all ordinary keys, long package names, and shrink while open. | No command without fitting exact lowercase `y`; centered dialog; safe cancellation strings. |
+| Upgrade all | Model/view tests cover active-tab scope, filters and thresholds, exclusions, immutable order, lowercase confirmation, serial execution, resize, partial failure/cancel, queue drop, and dual reload. Real-Homebrew PTY cases open and cancel the Apps and Formulae batches without mutating unrelated host packages. | `U` never aliases `u`; only eligible active-inventory snapshots reach the existing upgrade argv one at a time; summaries and reload counts are exact; cancellation starts nothing. |
 | Uninstall start/progress/result | Run the `tea.Cmd` returned by a fake model transition for setup success/failure, command failure, success+reload success/failure, cancel, cleanup failure, and duplicate events. The fake `Start` asserts starting state and spinner were committed before invocation and that `Start` was not called by `Update`. | One nonblocking start transition and one job/result; listener/setup precedes child start; no premature success; exact progress/reload/final status and cleanup-failure precedence. |
 | Askpass helper/core limit | Subprocess tests invoke both normal and helper dispatch with inspectable/injected limit setters, duplicate/malformed metadata cases, and a test broker. | Both paths establish `RLIMIT_CORE=0` before their specified boundaries; failure refuses password input/connect; duplicate or malformed metadata is rejected silently; no TUI/TTY check runs in helper mode; exact stdout newline appears only on success; retry starts empty. |
 | Private endpoint and child environment | Darwin integration/fault-injection tests use the real resolved literal `/tmp`; hostile pre-existing/duplicate askpass variables; symlink/type/owner/mode/path-length failures; and failure at every resolution/create/chmod/lstat/bind/listen/readiness/environment/prepare/start step. | Random directory is exactly 0700, socket exactly 0600, retained types/ownership are correct, symlinks and overlong paths fail, canonical child env contains exactly one value per key while the parent env is unchanged, listener is ready before child start, no child starts after setup failure, and only retained exact paths are removed. |
@@ -1076,7 +1102,7 @@ Parity and rewrite are complete only when all of the following are true:
 | Process cleanup | Integration-test a fake brew tree that ignores SIGTERM, holds descriptors, survives where controllable, and simulates permission-denied/uninspectable members. | Direct brew child is `Wait`-reaped exactly once; SIGTERM then bounded SIGKILL/observation; fixture descendants are observed exited; owned goroutines/FDS close; exact paths are removed; survivor/uninspectable cases return explicit cleanup failure; cleanup is idempotent. |
 | TTY/lifecycle | PTY and non-PTY subprocess tests cover normal quit, runtime failure fallback, ctrl+c/SIGINT, SIGTERM, and quit during active list, info, starting uninstall, and active uninstall. | Exact stderr and exit codes 0, 1, 130, or 143; terminal restored; list/info result-reap messages and uninstall terminal result are awaited; no owned command/goroutine/descriptor is abandoned; cleanup failures are surfaced. |
 | Quiescence | Model/runtime test reaches idle after list/info/uninstall completion and then observes commands/redraw triggers. | No 100 ms or other polling timer exists; with no active spinner/command, no tick is scheduled, and a stale tick neither mutates state nor schedules another. |
-| End-to-end Homebrew | PTY-drive the built binary against real Homebrew and a temporary `lazybrew/e2e` tap containing a local cask, an on-request formula, and its dependency. Run on stable Homebrew for macOS ARM and Intel, plus Homebrew `main` on a schedule. | Non-TTY startup refuses cleanly; `q`, Ctrl+C, and SIGTERM exit 0, 130, and 143; the deliberately untrusted formula is explained without loading, its provenance is reviewed, and `t` trusts only that formula in Homebrew's real trust store; `n`, sort, filter, and refresh controls land; the cask upgrades and uninstalls; a pinned outdated formula refuses upgrade; a real formula failure preserves 1.0 and restores controls; the repaired formula upgrades to 2.0; dependencies are revealed; the formula uninstalls; and cleanup removes every fixture. |
+| End-to-end Homebrew | PTY-drive the built binary against real Homebrew and a temporary `lazybrew/e2e` tap containing a local cask, an on-request formula, and its dependency. Run on stable Homebrew for macOS ARM and Intel, plus Homebrew `main` on a schedule. | Non-TTY startup refuses cleanly; `q`, Ctrl+C, and SIGTERM exit 0, 130, and 143; trust review remains package-scoped; `U` opens and safely cancels active-screen Apps and Formulae batches; display controls land; controlled cask/formula upgrade, failure, dependency, uninstall, and cleanup outcomes remain exact. |
 | End-to-end authentication | Keep three boundaries distinct: pure verifier fixtures as above; mandatory Darwin kernel/Security.framework integration with controlled processes; and a capability-gated PTY test in which fake Homebrew invokes real `/usr/bin/sudo -A` only when the host permits non-destructive sudo askpass testing. | Pure fixtures prove only verifier logic, Darwin integration proves kernel acquisition/fail-closed behavior, and the real-sudo positive path proves on-demand dialog/masking/fresh retry/submission when capability is available; skipping that capability-gated positive test does not replace either mandatory lower layer. |
 | Clean cutover | Repository check after implementation. | Go tests pass and no Python source/test/bytecode/helper artifact remains under `lazybrew/`. |
 

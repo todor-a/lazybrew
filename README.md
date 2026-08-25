@@ -19,6 +19,7 @@
 - **Trust review without loading code** — `!` marks packages Homebrew refuses to load; `t` fetches tap provenance, shows its remote, visibility, contents, and revision, then offers trust for that package only.
 - **Removal verdicts** — the info pane shows what depends on a formula and whether it is safe to remove.
 - **Queue actions, keep browsing** — the list stays navigable while an uninstall or upgrade runs; confirm more actions and they queue up and run serially, shown live at the bottom of the info pane.
+- **Upgrade all on this screen** — `U` snapshots every eligible Homebrew update for Apps or Formulae, previews their version transitions, confirms once, then runs the existing queue serially.
 - **Dependency X-ray** — formulae installed as dependencies are hidden by default; `a` reveals them.
 - **Four themes**, adapted to your terminal's light or dark background. `NO_COLOR` respected.
 
@@ -48,15 +49,16 @@ Upgrade or remove lazybrew itself with `brew upgrade --cask lazybrew` / `brew un
 | --- | --- |
 | `d` | Uninstall the selected package (confirm first) |
 | `u` | Upgrade the selected package — only when Homebrew reports it outdated and it is not pinned |
+| `U` | Upgrade every eligible package on the active Apps or Formulae screen |
 | `t` | Review and trust the selected untrusted package |
 
-While an action runs you can keep browsing, and `d`/`u` on other rows queues them.
+While an individual action runs you can keep browsing, and `d`/`u` on other rows queues them. An upgrade-all run is immutable after confirmation, so it accepts no extra operations.
 
 In search: type to filter, `Enter` keeps the query, `Esc` clears it, `Tab` completes a partial `is:` filter (the status row shows the completion) and otherwise switches kind with the query intact.
 
 ## Safety
 
-Uninstall, upgrade, and trust are delegated to `brew` — lazybrew never constructs shell commands, and package identities are validated before they reach an argv. Trust is package-scoped, runs as your user without `sudo`, and never offers whole-tap trust.
+Uninstall, upgrade, and trust are delegated to `brew` — lazybrew never constructs shell commands, and package identities are validated before they reach an argv. Upgrade all excludes pinned and untrusted packages plus the running lazybrew cask; the outdated display threshold and active search do not silently narrow the batch. Trust is package-scoped, runs as your user without `sudo`, and never offers whole-tap trust.
 
 The confirmation is deliberately strict: **only lowercase `y` proceeds**. `Y`, `Enter`, `Esc`, `q` — everything else cancels. If Homebrew needs administrator rights, lazybrew shows a masked password dialog inside the TUI; the password is handed to Homebrew's askpass mechanism and is never cached, logged, or written anywhere else. Cancelling mid-run also drops everything still queued — destructive work never continues past a cancel.
 
