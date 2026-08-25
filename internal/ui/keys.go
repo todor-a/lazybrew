@@ -30,13 +30,21 @@ var (
 		key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("All:", "a")),
 		key.NewBinding(key.WithKeys("f", "F"), key.WithHelp("Filter:", "f")),
 		key.NewBinding(key.WithKeys("o", "O"), key.WithHelp("Sort:", "o")),
-		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("Theme:", "t")),
+		key.NewBinding(key.WithKeys("n", "N"), key.WithHelp("Theme:", "n")),
 		key.NewBinding(key.WithKeys("r", "R"), key.WithHelp("Refresh:", "r")),
 		key.NewBinding(key.WithKeys("q", "Q"), key.WithHelp("Quit:", "q")),
 	}
 	confirmHelp = footerKeys{
 		key.NewBinding(key.WithKeys("y"), key.WithHelp("Confirm:", "y")),
 		key.NewBinding(key.WithKeys("__cancel_help__"), key.WithHelp("Cancel:", "any other key")),
+	}
+	trustBinding = key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("Review trust:", "t"))
+	trustHelp    = footerKeys{
+		key.NewBinding(key.WithKeys("y"), key.WithHelp("Trust package:", "y")),
+		key.NewBinding(key.WithKeys("__cancel_trust_help__"), key.WithHelp("Cancel:", "any other key")),
+	}
+	trustLoadingHelp = footerKeys{
+		key.NewBinding(key.WithKeys("esc"), key.WithHelp("Loading trust details;", "Esc: cancel")),
 	}
 	loadingHelp = footerKeys{
 		key.NewBinding(key.WithKeys("q", "Q"), key.WithHelp("Quit:", "q")),
@@ -70,7 +78,7 @@ func operationHelp(op brew.Operation) footerKeys {
 		),
 		key.NewBinding(key.WithKeys("a", "A"), key.WithHelp("All:", "a")),
 		key.NewBinding(key.WithKeys("o", "O"), key.WithHelp("Sort:", "o")),
-		key.NewBinding(key.WithKeys("t", "T"), key.WithHelp("Theme:", "t")),
+		key.NewBinding(key.WithKeys("n", "N"), key.WithHelp("Theme:", "n")),
 	}
 }
 

@@ -20,8 +20,15 @@ type fakeHomebrew struct {
 	packages     map[brew.Kind][]brew.Package
 	outdated     map[brew.Kind][]brew.OutdatedPackage
 	outdatedErr  error
-	untrusted    map[brew.Kind][]string
+	untrusted    map[brew.Kind][]brew.UntrustedPackage
 	untrustedErr error
+	trustDetails brew.TrustDetails
+	trustInfoErr error
+	trustErr     error
+	trustInfo    int
+	trusts       int
+	reviewed     brew.Package
+	trusted      brew.Package
 	err          error
 	listStarted  chan struct{}
 	listCalls    map[brew.Kind]int
@@ -75,11 +82,23 @@ func (f *fakeHomebrew) Outdated(_ context.Context, kind brew.Kind) ([]brew.Outda
 	return append([]brew.OutdatedPackage(nil), f.outdated[kind]...), nil
 }
 
-func (f *fakeHomebrew) Untrusted(_ context.Context, kind brew.Kind) ([]string, error) {
+func (f *fakeHomebrew) Untrusted(_ context.Context, kind brew.Kind) ([]brew.UntrustedPackage, error) {
 	if f.untrustedErr != nil {
 		return nil, f.untrustedErr
 	}
-	return append([]string(nil), f.untrusted[kind]...), nil
+	return append([]brew.UntrustedPackage(nil), f.untrusted[kind]...), nil
+}
+
+func (f *fakeHomebrew) TrustDetails(_ context.Context, pkg brew.Package) (brew.TrustDetails, error) {
+	f.trustInfo++
+	f.reviewed = pkg
+	return f.trustDetails, f.trustInfoErr
+}
+
+func (f *fakeHomebrew) Trust(_ context.Context, pkg brew.Package) error {
+	f.trusts++
+	f.trusted = pkg
+	return f.trustErr
 }
 
 func (f *fakeHomebrew) Info(_ context.Context, pkg brew.Package) (string, error) {
@@ -435,7 +454,7 @@ func TestJobWindowAllowsBrowsingAndBlocksMutation(t *testing.T) {
 	if m.list.Index() != 1 || infoCommand == nil {
 		t.Fatalf("browsing dead during job: index=%d info=%v", m.list.Index(), infoCommand != nil)
 	}
-	m.Update(textKey("t"))
+	m.Update(textKey("n"))
 	if m.themeIndex != 1 {
 		t.Fatal("theme cycle dead during job")
 	}
@@ -451,7 +470,7 @@ func TestJobWindowAllowsBrowsingAndBlocksMutation(t *testing.T) {
 	}
 
 	lines := strippedLines(m)
-	if !strings.Contains(lines[m.height-2], "Uninstall in progress; browse only") || !strings.Contains(lines[m.height-2], "Theme: t") {
+	if !strings.Contains(lines[m.height-2], "Uninstall in progress; browse only") || !strings.Contains(lines[m.height-2], "Theme: n") {
 		t.Fatalf("job footer=%q", lines[m.height-2])
 	}
 
@@ -643,7 +662,7 @@ func TestUninstallStartAndTerminalFailuresRestoreControls(t *testing.T) {
 		if m.mode != modeNormal || m.status != "setup failed" || m.operation != nil {
 			t.Fatalf("start failure state: mode=%v status=%q operation=%#v", m.mode, m.status, m.operation)
 		}
-		m.Update(textKey("t"))
+		m.Update(textKey("n"))
 		if m.themeIndex != 1 {
 			t.Fatal("normal controls remained disabled after start failure")
 		}
@@ -667,7 +686,7 @@ func TestUninstallStartAndTerminalFailuresRestoreControls(t *testing.T) {
 			if m.mode != modeNormal || m.loading || m.status != tt.status || m.operation != nil {
 				t.Fatalf("terminal failure state: mode=%v loading=%v status=%q operation=%#v", m.mode, m.loading, m.status, m.operation)
 			}
-			m.Update(textKey("t"))
+			m.Update(textKey("n"))
 			if m.themeIndex != 1 {
 				t.Fatal("normal controls remained disabled after terminal failure")
 			}
@@ -698,7 +717,7 @@ func TestUninstallSuccessWaitsForReloadAndKeepsTargetSnapshot(t *testing.T) {
 				t.Fatalf("success exposed before reload: mode=%v loading=%v purpose=%v", m.mode, m.loading, m.loadPurpose)
 			}
 			kind, theme, index, starts := m.kind, m.themeIndex, m.list.Index(), uninstaller.starts
-			for _, key := range []tea.KeyPressMsg{textKey("q"), textKey("tab"), textKey("d"), textKey("j"), textKey("t")} {
+			for _, key := range []tea.KeyPressMsg{textKey("q"), textKey("tab"), textKey("d"), textKey("j"), textKey("n")} {
 				m.Update(key)
 			}
 			if m.kind != kind || m.themeIndex != theme || m.list.Index() != index || uninstaller.starts != starts || m.mode != modeOperation {
@@ -1098,11 +1117,12 @@ func TestSupervisorCancelsEverythingBeforeConcurrentWaitAndAwaitsRacedJob(t *tes
 	}
 
 	supervisor := &Supervisor{info: loader}
-	listCancelled, startCancelled := make(chan struct{}), make(chan struct{})
-	listDone, startDone, jobDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var listOnce, startOnce sync.Once
+	listCancelled, startCancelled, trustCancelled := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	listDone, startDone, trustDone, jobDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var listOnce, startOnce, trustOnce sync.Once
 	supervisor.setList(func() { listOnce.Do(func() { close(listCancelled) }) }, listDone)
 	supervisor.setStart(func() { startOnce.Do(func() { close(startCancelled) }) }, startDone)
+	supervisor.setTrust(func() { trustOnce.Do(func() { close(trustCancelled) }) }, trustDone)
 	job := newSupervisorJob()
 	supervisor.setJob(job, jobDone)
 
@@ -1116,6 +1136,7 @@ func TestSupervisorCancelsEverythingBeforeConcurrentWaitAndAwaitsRacedJob(t *tes
 		"list":  listCancelled,
 		"info":  infoCancelled,
 		"start": startCancelled,
+		"trust": trustCancelled,
 		"job":   job.cancelled,
 	} {
 		select {
@@ -1135,6 +1156,7 @@ func TestSupervisorCancelsEverythingBeforeConcurrentWaitAndAwaitsRacedJob(t *tes
 	}
 	close(listDone)
 	close(startDone)
+	close(trustDone)
 	close(jobDone)
 	select {
 	case err := <-cleaned:
@@ -2121,19 +2143,22 @@ func TestUntrustedMarksLandOnRows(t *testing.T) {
 		},
 		// "ghost" is a name the inventory never shows; harmless here, exactly as
 		// an outdated name for a dependency-only formula is.
-		untrusted: map[brew.Kind][]string{brew.Cask: {"Beta", "ghost"}},
+		untrusted: map[brew.Kind][]brew.UntrustedPackage{brew.Cask: {
+			{Name: "Beta", FullName: "other/tap/Beta", Tap: "other/tap"},
+			{Name: "ghost", FullName: "other/tap/ghost", Tap: "other/tap"},
+		}},
 	}
 	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
 	m := root.(*model)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
 	drainList(t, m, m.Init())
 
-	var got []bool
+	var got []brew.Package
 	for _, item := range m.list.Items() {
-		got = append(got, item.(packageItem).packageValue.Untrusted)
+		got = append(got, item.(packageItem).packageValue)
 	}
-	if !slices.Equal(got, []bool{false, true}) {
-		t.Fatalf("untrusted marks=%v, want only Beta marked", got)
+	if got[0].Untrusted || !got[1].Untrusted || got[1].FullName != "other/tap/Beta" || got[1].Tap != "other/tap" {
+		t.Fatalf("untrusted rows=%+v, want only Beta marked with full identity", got)
 	}
 }
 
@@ -2144,7 +2169,9 @@ func TestAFailedUntrustedReadStillLoadsAnUnmarkedList(t *testing.T) {
 		packages: map[brew.Kind][]brew.Package{
 			brew.Cask: {{Name: "Alpha", Version: "1.0", Kind: brew.Cask}},
 		},
-		untrusted:    map[brew.Kind][]string{brew.Cask: {"Alpha"}},
+		untrusted: map[brew.Kind][]brew.UntrustedPackage{brew.Cask: {
+			{Name: "Alpha", FullName: "other/tap/Alpha", Tap: "other/tap"},
+		}},
 		untrustedErr: errors.New("Unknown command: trust"),
 	}
 	root, _ := New(homebrew, info.New(homebrew.Info), &fakeUninstaller{job: newFakeJob()}, t.TempDir())
@@ -2157,6 +2184,63 @@ func TestAFailedUntrustedReadStillLoadsAnUnmarkedList(t *testing.T) {
 	}
 	if m.list.Items()[0].(packageItem).packageValue.Untrusted {
 		t.Fatal("a failed trust read produced a mark")
+	}
+}
+
+func TestTrustReviewLoadsProvenanceThenTrustsTheImmutablePackage(t *testing.T) {
+	m, _ := newTestModel(t)
+	homebrew := m.homebrew.(*fakeHomebrew)
+	homebrew.trustDetails = brew.TrustDetails{
+		Remote: "https://github.com/vendor/homebrew-tap", Head: "abcdef123456", LastCommit: "2 weeks ago",
+		Formulae: 1,
+	}
+	pkg := brew.Package{
+		Name: "Alpha", Version: "1.0", Kind: brew.Formula, Untrusted: true,
+		FullName: "vendor/tap/Alpha", Tap: "vendor/tap",
+	}
+	m.setPackages([]brew.Package{pkg}, 0)
+	m.kind = brew.Formula
+	m.listCache[brew.Formula] = []brew.Package{pkg}
+
+	_, detailsCmd := m.Update(textKey("t"))
+	if m.mode != modeTrust || !m.trustPending || homebrew.trustInfo != 0 {
+		t.Fatalf("review start: mode=%v pending=%v calls=%d", m.mode, m.trustPending, homebrew.trustInfo)
+	}
+	for _, msg := range immediateMessages(detailsCmd) {
+		m.Update(msg)
+	}
+	if m.trustPending || m.trustDetails == nil || homebrew.trustInfo != 1 || homebrew.reviewed != pkg {
+		t.Fatalf("review result: pending=%v details=%+v calls=%d package=%+v", m.trustPending, m.trustDetails, homebrew.trustInfo, homebrew.reviewed)
+	}
+
+	_, trustCmd := m.Update(textKey("y"))
+	if !m.trustPending || homebrew.trusts != 0 {
+		t.Fatalf("trust start: pending=%v calls=%d", m.trustPending, homebrew.trusts)
+	}
+	for _, msg := range immediateMessages(trustCmd) {
+		m.Update(msg)
+	}
+	selected := m.selectedPackage()
+	if m.mode != modeNormal || selected == nil || selected.Untrusted || selected.FullName != "" || selected.Tap != "" ||
+		m.status != "Trusted Alpha" || homebrew.trusts != 1 || homebrew.trusted != pkg {
+		t.Fatalf("trust result: mode=%v selected=%+v status=%q calls=%d package=%+v", m.mode, selected, m.status, homebrew.trusts, homebrew.trusted)
+	}
+}
+
+func TestTrustReviewRefusesToHideItsWarningBelowTheMinimumModalSize(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: minimumWidth, Height: minimumHeight})
+	m.setPackages([]brew.Package{{
+		Name: "Alpha", Version: "1.0", Kind: brew.Formula, Untrusted: true,
+		FullName: "vendor/tap/Alpha", Tap: "vendor/tap",
+	}}, 0)
+
+	_, command := m.Update(textKey("t"))
+	for _, msg := range immediateMessages(command) {
+		m.Update(msg)
+	}
+	if m.mode != modeNormal || m.status != "Terminal too small for trust review" {
+		t.Fatalf("small trust review: mode=%v status=%q", m.mode, m.status)
 	}
 }
 

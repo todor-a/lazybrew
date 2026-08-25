@@ -39,6 +39,17 @@ func TestMinimumSizeAndExactThirtyCellFooter(t *testing.T) {
 	if got != want {
 		t.Fatalf("footer interior=%q, want %q", got, want)
 	}
+
+	m.setPackages([]brew.Package{{
+		Name: "Alpha", Kind: brew.Cask, Untrusted: true,
+		FullName: "vendor/tap/Alpha", Tap: "vendor/tap",
+	}}, 0)
+	footerRunes = []rune(strippedLines(m)[7])
+	got = string(footerRunes[1:31])
+	want = "Search: / · Review trust: t · "
+	if got != want {
+		t.Fatalf("untrusted footer interior=%q, want %q", got, want)
+	}
 }
 
 func TestResponsiveSplitAppearsAtSeventyTwoColumns(t *testing.T) {
@@ -95,6 +106,36 @@ func TestConfirmationAndPasswordAreCenteredLayersOverBase(t *testing.T) {
 	}
 }
 
+func TestTrustReviewIsACenteredPackageLevelConfirmation(t *testing.T) {
+	m, _ := newTestModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 24})
+	pkg := brew.Package{
+		Name: "widget", Version: "1.0", Kind: brew.Formula, Untrusted: true,
+		FullName: "vendor/tap/widget", Tap: "vendor/tap",
+	}
+	m.trustPackage = &pkg
+	m.trustDetails = &brew.TrustDetails{
+		Remote: "https://github.com/vendor/homebrew-tap", Head: "abcdef123456", LastCommit: "2 weeks ago",
+		Formulae: 1, Casks: 2, Commands: 3,
+	}
+	m.mode = modeTrust
+
+	view := strings.Join(strippedLines(m), "\n")
+	for _, want := range []string{
+		"Review formula trust",
+		"Package  vendor/tap/widget",
+		"Remote   https://github.com/vendor/homebrew-tap",
+		"Contents 1 formulae · 2 casks · 3 commands",
+		"Revision abcdef1 · 2 weeks ago",
+		"Other tap items stay untrusted.",
+		"y: trust package  other: cancel",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("trust review missing %q\n%s", want, view)
+		}
+	}
+}
+
 func TestSelfUninstallConfirmationNamesExit(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.setPackages([]brew.Package{{Name: "lazybrew", Kind: brew.Cask}}, 0)
@@ -114,7 +155,7 @@ func TestThemeCycleAndRoleTable(t *testing.T) {
 			t.Fatalf("theme %d=%q, want %q", index, got, name)
 		}
 		if index+1 < len(want) {
-			m.Update(textKey("t"))
+			m.Update(textKey("n"))
 		}
 	}
 	if themes[0].selected.background.dark != "#316dca" || themes[0].selected.foreground.dark != "#ffffff" {
@@ -492,7 +533,7 @@ func TestFooterListsEveryNormalKey(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
 	lines := strippedLines(m)
 	footer := strings.TrimRight(strings.Trim(lines[len(lines)-2], "│"), " ")
-	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Filter: f · Sort: o · Theme: t · Refresh: r · Quit: q"
+	want := "Search: / · Switch: tab · Uninstall: d · Upgrade: u · All: a · Filter: f · Sort: o · Theme: n · Refresh: r · Quit: q"
 	if footer != want {
 		t.Fatalf("footer=%q, want %q", footer, want)
 	}

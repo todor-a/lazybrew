@@ -15,14 +15,18 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	sizes := brew.Sizes{Formula: map[string]int64{"alpha": 1024}, Total: 2048}
 	saveSnapshot(path, snapshot{
 		Lists: map[brew.Kind][]brew.Package{
-			brew.Formula: {{Name: "alpha", Version: "1.0", Kind: brew.Formula, Outdated: true, OutdatedKnown: true, Pinned: true}},
+			brew.Formula: {{
+				Name: "alpha", Version: "1.0", Kind: brew.Formula, Outdated: true, OutdatedKnown: true, Pinned: true,
+				Untrusted: true, FullName: "other/tap/alpha", Tap: "other/tap",
+			}},
 		},
 		Sizes: &sizes,
 	})
 
 	loaded := loadSnapshot(path)
 	formulae := loaded.Lists[brew.Formula]
-	if len(formulae) != 1 || formulae[0].Name != "alpha" || !formulae[0].Outdated || !formulae[0].OutdatedKnown || !formulae[0].Pinned {
+	if len(formulae) != 1 || formulae[0].Name != "alpha" || !formulae[0].Outdated || !formulae[0].OutdatedKnown || !formulae[0].Pinned ||
+		!formulae[0].Untrusted || formulae[0].FullName != "other/tap/alpha" || formulae[0].Tap != "other/tap" {
 		t.Fatalf("loaded lists %+v", loaded.Lists)
 	}
 	if loaded.Sizes == nil || loaded.Sizes.Formula["alpha"] != 1024 || loaded.Sizes.Total != 2048 {
@@ -34,7 +38,11 @@ func TestSnapshotRoundTrip(t *testing.T) {
 // boot, never an error and never half-decoded rows.
 func TestSnapshotDegradesToCold(t *testing.T) {
 	path := snapshotFile(t.TempDir())
-	for _, raw := range []string{"not json", `{"version":99,"lists":{"cask":[{"Name":"x"}]}}`} {
+	for _, raw := range []string{
+		"not json",
+		`{"version":2,"lists":{"formula":[{"Name":"alpha","Untrusted":true}]}}`,
+		`{"version":99,"lists":{"cask":[{"Name":"x"}]}}`,
+	} {
 		if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
 			t.Fatal(err)
 		}

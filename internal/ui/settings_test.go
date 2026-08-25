@@ -37,7 +37,7 @@ func TestThemeChoicePersistsAcrossRuns(t *testing.T) {
 	m, _ := newTestModel(t)
 	m.settingsPath = settingsFile(t.TempDir())
 
-	m.Update(textKey("t"))
+	m.Update(textKey("n"))
 	saved := loadSettings(m.settingsPath)
 	if saved.Theme != themes[m.themeIndex].name {
 		t.Fatalf("saved theme %q, want %q", saved.Theme, themes[m.themeIndex].name)
@@ -62,7 +62,7 @@ func TestThemeChoicePersistsAcrossRuns(t *testing.T) {
 
 	// An empty path (persistence disabled) must not panic on either side.
 	m.settingsPath = ""
-	m.Update(textKey("t"))
+	m.Update(textKey("n"))
 	if got := themeIndexByName(loadSettings("").Theme); got != 0 {
 		t.Fatalf("disabled persistence restored index %d, want 0", got)
 	}

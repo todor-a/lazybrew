@@ -31,7 +31,7 @@ type snapshot struct {
 	Sizes   *brew.Sizes                  `json:"sizes,omitempty"`
 }
 
-const snapshotVersion = 2
+const snapshotVersion = 3
 
 // snapshotFile places the file next to settings. An empty dir disables
 // persistence, which is also how tests keep model construction off the real

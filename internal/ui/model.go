@@ -38,6 +38,7 @@ const (
 	modeConfirm
 	modeOperation
 	modePassword
+	modeTrust
 	modeQuitting
 )
 
@@ -90,6 +91,8 @@ type Supervisor struct {
 	sizesDone         <-chan struct{}
 	startCancel       context.CancelFunc
 	startDone         <-chan struct{}
+	trustCancel       context.CancelFunc
+	trustDone         <-chan struct{}
 	job               privileged.Job
 	jobDone           <-chan struct{}
 	jobResultRecorded bool
@@ -158,6 +161,26 @@ func (s *Supervisor) clearStart(done <-chan struct{}) {
 	s.mu.Unlock()
 }
 
+func (s *Supervisor) setTrust(cancel context.CancelFunc, done <-chan struct{}) {
+	s.mu.Lock()
+	closing := s.closing
+	if !closing {
+		s.trustCancel, s.trustDone = cancel, done
+	}
+	s.mu.Unlock()
+	if closing {
+		cancel()
+	}
+}
+
+func (s *Supervisor) clearTrust(done <-chan struct{}) {
+	s.mu.Lock()
+	if s.trustDone == done {
+		s.trustCancel, s.trustDone = nil, nil
+	}
+	s.mu.Unlock()
+}
+
 func (s *Supervisor) setJob(job privileged.Job, done <-chan struct{}) {
 	s.mu.Lock()
 	s.job, s.jobDone = job, done
@@ -201,6 +224,7 @@ func (s *Supervisor) cancel() {
 	listCancel := s.listCancel
 	sizesCancel := s.sizesCancel
 	startCancel := s.startCancel
+	trustCancel := s.trustCancel
 	job := s.job
 	s.mu.Unlock()
 
@@ -212,6 +236,9 @@ func (s *Supervisor) cancel() {
 	}
 	if startCancel != nil {
 		startCancel()
+	}
+	if trustCancel != nil {
+		trustCancel()
 	}
 	if s.info != nil {
 		s.info.Cancel()
@@ -229,10 +256,11 @@ func (s *Supervisor) Cleanup(ctx context.Context) error {
 	listDone := s.listDone
 	sizesDone := s.sizesDone
 	startDone := s.startDone
+	trustDone := s.trustDone
 	jobDone := s.jobDone
 	s.mu.Unlock()
 
-	waits := []<-chan struct{}{listDone, sizesDone, startDone, jobDone}
+	waits := []<-chan struct{}{listDone, sizesDone, startDone, trustDone, jobDone}
 	if s.info != nil {
 		waits = append(waits, s.info.Done())
 	}
@@ -340,6 +368,19 @@ type jobResultMsg struct {
 	result privileged.Result
 }
 
+type trustDetailsResultMsg struct {
+	id      uint64
+	details brew.TrustDetails
+	err     error
+	done    <-chan struct{}
+}
+
+type trustResultMsg struct {
+	id   uint64
+	err  error
+	done <-chan struct{}
+}
+
 type model struct {
 	homebrew   brew.Homebrew
 	info       *info.Loader
@@ -416,6 +457,13 @@ type model struct {
 	passwordAttempts int
 	cancelReason     cancelReason
 	spinnerActive    bool
+	trustPackage     *brew.Package
+	trustDetails     *brew.TrustDetails
+	trustErr         string
+	trustID          uint64
+	trustCancel      context.CancelFunc
+	trustPending     bool
+	trusting         bool
 	quitExitCode     int
 }
 
@@ -544,6 +592,10 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.handleJobEvent(msg)
 	case jobResultMsg:
 		return m, m.handleJobResult(msg)
+	case trustDetailsResultMsg:
+		return m, m.handleTrustDetailsResult(msg)
+	case trustResultMsg:
+		return m, m.handleTrustResult(msg)
 	case spinner.TickMsg:
 		if !m.spinnerActive {
 			return m, nil
@@ -587,6 +639,8 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.updateConfirmation(key)
 	case modePassword:
 		return m, m.updatePassword(key)
+	case modeTrust:
+		return m, m.updateTrust(key)
 	case modeOperation:
 		// A running job acts only on its immutable snapshot, so the list stays
 		// browsable underneath it. updateNormal's jobRunning guards keep every
@@ -727,6 +781,8 @@ func (m *model) updateNormal(key tea.KeyPressMsg) tea.Cmd {
 	case "u", "U":
 		return m.confirmOperation(brew.Upgrade)
 	case "t", "T":
+		return m.reviewTrust()
+	case "n", "N":
 		m.themeIndex = (m.themeIndex + 1) % len(themes)
 		m.status, m.priority = "Theme: "+themes[m.themeIndex].name, false
 		saveSettings(m.settingsPath, settings{Theme: themes[m.themeIndex].name})
@@ -959,6 +1015,165 @@ func (m *model) updateConfirmation(key tea.KeyPressMsg) tea.Cmd {
 	}
 	m.verb = m.confirmVerb
 	return m.startUninstall(*snapshot)
+}
+
+func (m *model) reviewTrust() tea.Cmd {
+	selected := m.selectedPackage()
+	if selected == nil || !selected.Untrusted || selected.FullName == "" || selected.Tap == "" || m.jobRunning() {
+		return nil
+	}
+	snapshot := *selected
+	m.trustPackage = &snapshot
+	m.trustDetails = nil
+	m.trustErr = ""
+	m.trusting = false
+	m.mode = modeTrust
+	m.status, m.priority = "Loading trust details...", true
+	if !m.trustReviewFits() {
+		m.cancelTrust("Terminal too small for trust review")
+		return nil
+	}
+	return m.startTrustDetails(snapshot)
+}
+
+func (m *model) startTrustDetails(pkg brew.Package) tea.Cmd {
+	m.trustID++
+	id := m.trustID
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.trustCancel = cancel
+	m.trustPending = true
+	m.supervisor.setTrust(cancel, done)
+	return func() tea.Msg {
+		details, err := m.homebrew.TrustDetails(ctx, pkg)
+		close(done)
+		return trustDetailsResultMsg{id: id, details: details, err: err, done: done}
+	}
+}
+
+func (m *model) handleTrustDetailsResult(msg trustDetailsResultMsg) tea.Cmd {
+	m.supervisor.clearTrust(msg.done)
+	if msg.id != m.trustID {
+		return nil
+	}
+	m.trustPending = false
+	if m.trustCancel != nil {
+		m.trustCancel()
+	}
+	m.trustCancel = nil
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+	if msg.err != nil {
+		m.trustErr = flattenStatus(msg.err.Error())
+		m.status, m.priority = "Could not load trust details", true
+		if !m.trustReviewFits() {
+			m.cancelTrust("Terminal too small for trust review")
+		}
+		return nil
+	}
+	m.trustDetails = &msg.details
+	if !m.trustReviewFits() {
+		m.cancelTrust("Terminal too small for trust review")
+		return nil
+	}
+	m.status, m.priority = "Review trust", true
+	return nil
+}
+
+func (m *model) updateTrust(key tea.KeyPressMsg) tea.Cmd {
+	if key.String() == "esc" {
+		m.cancelTrust("Trust cancelled")
+		return nil
+	}
+	if m.trustPending {
+		return nil
+	}
+	if key.Key().Text == "y" && m.trustDetails != nil && m.trustErr == "" && m.trustPackage != nil {
+		return m.startTrust(*m.trustPackage)
+	}
+	m.cancelTrust("Trust cancelled")
+	return nil
+}
+
+func (m *model) startTrust(pkg brew.Package) tea.Cmd {
+	m.trustID++
+	id := m.trustID
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m.trustCancel = cancel
+	m.trustPending = true
+	m.trusting = true
+	m.trustErr = ""
+	m.status, m.priority = "Trusting "+pkg.Name+"...", true
+	m.supervisor.setTrust(cancel, done)
+	return func() tea.Msg {
+		err := m.homebrew.Trust(ctx, pkg)
+		close(done)
+		return trustResultMsg{id: id, err: err, done: done}
+	}
+}
+
+func (m *model) handleTrustResult(msg trustResultMsg) tea.Cmd {
+	m.supervisor.clearTrust(msg.done)
+	if msg.id != m.trustID {
+		return nil
+	}
+	m.trustPending = false
+	if m.trustCancel != nil {
+		m.trustCancel()
+	}
+	m.trustCancel = nil
+	if m.mode == modeQuitting {
+		return m.finishQuit()
+	}
+	if msg.err != nil {
+		m.trusting = false
+		m.trustErr = flattenStatus(msg.err.Error())
+		m.status, m.priority = "Could not trust package", true
+		return nil
+	}
+	return m.finishTrust()
+}
+
+func (m *model) finishTrust() tea.Cmd {
+	if m.trustPackage == nil {
+		return nil
+	}
+	pkg := *m.trustPackage
+	cached := m.listCache[pkg.Kind]
+	for i := range cached {
+		if cached[i].Name == pkg.Name && cached[i].FullName == pkg.FullName && cached[i].Tap == pkg.Tap {
+			cached[i].Untrusted = false
+			cached[i].FullName = ""
+			cached[i].Tap = ""
+		}
+	}
+	m.listCache[pkg.Kind] = cached
+	selection := m.list.Index()
+	if m.kind == pkg.Kind {
+		m.setPackages(cached, selection)
+	}
+	m.persistSnapshot()
+	m.info.Refresh(nil)
+	m.trustPackage, m.trustDetails = nil, nil
+	m.trustErr, m.trusting = "", false
+	m.mode = modeNormal
+	m.status, m.priority = "Trusted "+pkg.Name, true
+	return m.selectInfo()
+}
+
+func (m *model) cancelTrust(status string) {
+	if m.trustCancel != nil {
+		m.trustCancel()
+	}
+	m.trustID++
+	m.trustPending = false
+	m.trustCancel = nil
+	m.trustPackage, m.trustDetails = nil, nil
+	m.trustErr, m.trusting = "", false
+	m.mode = modeNormal
+	m.status, m.priority = status, true
 }
 
 func (m *model) updatePassword(key tea.KeyPressMsg) tea.Cmd {
@@ -1260,7 +1475,7 @@ func (m *model) startList(purpose loadPurpose, selection int) tea.Cmd {
 			listErr       error
 			outdated      []brew.OutdatedPackage
 			outdatedKnown bool
-			untrusted     []string
+			untrusted     []brew.UntrustedPackage
 		)
 		wg.Add(3)
 		go func() {
@@ -1349,17 +1564,19 @@ func markOutdated(packages []brew.Package, outdated []brew.OutdatedPackage, know
 // matched by name against the rows exactly as markOutdated is. No Known twin:
 // nothing anywhere renders an assurance of trust, so absence of evidence
 // already renders as absence of the mark.
-func markUntrusted(packages []brew.Package, names []string) []brew.Package {
-	if len(names) == 0 {
+func markUntrusted(packages []brew.Package, identities []brew.UntrustedPackage) []brew.Package {
+	if len(identities) == 0 {
 		return packages
 	}
-	untrusted := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		untrusted[name] = struct{}{}
+	untrusted := make(map[string]brew.UntrustedPackage, len(identities))
+	for _, identity := range identities {
+		untrusted[identity.Name] = identity
 	}
 	for i := range packages {
-		if _, ok := untrusted[packages[i].Name]; ok {
+		if identity, ok := untrusted[packages[i].Name]; ok {
 			packages[i].Untrusted = true
+			packages[i].FullName = identity.FullName
+			packages[i].Tap = identity.Tap
 		}
 	}
 	return packages
@@ -1735,6 +1952,9 @@ func (m *model) resize(width, height int) tea.Cmd {
 		m.mode = modeOperation
 		m.status, m.priority = tooSmallStatus(m.verb), true
 	}
+	if m.mode == modeTrust && !m.trustReviewFits() {
+		m.cancelTrust("Terminal too small for trust review")
+	}
 	return nil
 }
 
@@ -1762,7 +1982,7 @@ func (m *model) beginQuit(exitCode int) tea.Cmd {
 }
 
 func (m *model) finishQuit() tea.Cmd {
-	if m.mode != modeQuitting || m.loading || m.infoPending || m.sizesPending || m.startPending || m.jobPending {
+	if m.mode != modeQuitting || m.loading || m.infoPending || m.sizesPending || m.startPending || m.jobPending || m.trustPending {
 		return nil
 	}
 	if m.supervisor.cleanupError() != nil {

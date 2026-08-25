@@ -44,11 +44,41 @@ func TestBlackBox(t *testing.T) {
 	binary := buildApp(t)
 
 	fixture := installBrewFixture(t)
+	fixture.untrustFormulae(t)
+	t.Run("reviews and trusts a real untrusted formula", func(t *testing.T) {
+		app := startApp(t, binary, fixture.home)
+		app.waitFor(t, "casks installed", 20*time.Second)
+		at := app.mark()
+		app.send(t, "\t")
+		app.waitForAfter(t, at, "formulae installed", 20*time.Second)
+		at = app.mark()
+		app.send(t, "/"+fixture.root+"\r")
+		app.waitForAfter(t, at, "Untrusted formula", 20*time.Second)
+		app.waitForAfter(t, at, "brew trust --formula", 20*time.Second)
+		app.waitForAfter(t, at, "brew untrust --formula", 20*time.Second)
+		at = app.mark()
+		app.send(t, "t")
+		app.waitForAfter(t, at, "Review formula trust", 10*time.Second)
+		app.waitForAfter(t, at, "Contents", 30*time.Second)
+		at = app.mark()
+		app.send(t, "y")
+		// Bubble Tea may paint the transient Trusted status as a cursor-addressed
+		// delta, so the raw PTY stream need not contain it contiguously. The fresh
+		// info load is the stable post-success frame; the trust store below is the
+		// authority for the mutation itself.
+		app.waitForAfter(t, at, "Loading info...", 20*time.Second)
+		app.send(t, "q")
+		app.wait(t)
+	})
+	fixture.requireFormulaTrust(t, fixture.root, true)
+	fixture.requireFormulaTrust(t, fixture.dep, false)
+	fixture.trustDependency(t)
+
 	t.Run("refreshes and applies display controls", func(t *testing.T) {
 		app := startApp(t, binary, fixture.home)
 		app.waitFor(t, "casks installed", 20*time.Second)
 		at := app.mark()
-		app.send(t, "t")
+		app.send(t, "n")
 		app.waitForAfter(t, at, "Theme: Bright", 10*time.Second)
 		at = app.mark()
 		app.send(t, "o")

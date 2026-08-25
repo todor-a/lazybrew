@@ -381,12 +381,13 @@ func TestUntrustedCommandVectorsAndFiltering(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			argsFile := configureFakeBrew(t, trustJSON+"\n", "", 0, false)
 			fakeBrewStdoutByArg(t, map[string]string{"--full-name": inventory})
-			names, err := New().Untrusted(context.Background(), tt.kind)
+			packages, err := New().Untrusted(context.Background(), tt.kind)
 			if err != nil {
 				t.Fatalf("Untrusted() error = %v", err)
 			}
-			if want := []string{"marked"}; !slices.Equal(names, want) {
-				t.Fatalf("Untrusted() = %#v, want %#v", names, want)
+			want := []UntrustedPackage{{Name: "marked", FullName: "other/tap/marked", Tap: "other/tap"}}
+			if !slices.Equal(packages, want) {
+				t.Fatalf("Untrusted() = %#v, want %#v", packages, want)
 			}
 			// Any order: the inventory and trust store reads are concurrent.
 			assertRecordedArgsAnyOrder(t, argsFile,
@@ -414,5 +415,65 @@ func TestUntrustedRefusesAnInvalidKindWithoutStartingBrew(t *testing.T) {
 	}
 	if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid kind started brew; marker error = %v", err)
+	}
+}
+
+func TestTrustDetailsAndMutationUseTheImmutableFullIdentity(t *testing.T) {
+	const report = `[{"name":"vendor/tap","remote":"https://github.com/vendor/homebrew-tap","private":false,"custom_remote":false,"HEAD":"abcdef123456","last_commit":"2 weeks ago","formula_names":["vendor/tap/widget"],"cask_tokens":["vendor/tap/app"],"command_files":["/tap/cmd/brew-tool.rb"]}]`
+	pkg := Package{
+		Name: "widget", Kind: Formula, Untrusted: true,
+		FullName: "vendor/tap/widget", Tap: "vendor/tap",
+	}
+
+	argsFile := configureFakeBrew(t, report, "", 0, false)
+	details, err := New().TrustDetails(context.Background(), pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TrustDetails{
+		Remote: "https://github.com/vendor/homebrew-tap", Head: "abcdef123456", LastCommit: "2 weeks ago",
+		Formulae: 1, Casks: 1, Commands: 1,
+	}
+	if details != want {
+		t.Fatalf("TrustDetails() = %+v, want %+v", details, want)
+	}
+	assertRecordedArgs(t, argsFile, []string{"tap-info", "--json=v1", "vendor/tap"})
+
+	argsFile = configureFakeBrew(t, "Trusted formula: vendor/tap/widget\n", "", 0, false)
+	if err := New().Trust(context.Background(), pkg); err != nil {
+		t.Fatal(err)
+	}
+	assertRecordedArgs(t, argsFile, []string{"trust", "--formula", "vendor/tap/widget"})
+}
+
+func TestTrustReviewRefusesMismatchedIdentityBeforeStartingBrew(t *testing.T) {
+	for _, pkg := range []Package{
+		{Name: "widget", Kind: Formula, Untrusted: true, FullName: "other/tap/widget", Tap: "vendor/tap"},
+		{Name: "widget", Kind: Formula, Untrusted: true, FullName: "vendor/tap/other", Tap: "vendor/tap"},
+		{Name: "widget", Kind: Kind("other"), Untrusted: true, FullName: "vendor/tap/widget", Tap: "vendor/tap"},
+		{Name: "widget", Kind: Formula},
+	} {
+		argsFile := configureFakeBrew(t, "must not run", "", 0, false)
+		if _, err := New().TrustDetails(context.Background(), pkg); err == nil {
+			t.Fatalf("TrustDetails() accepted %+v", pkg)
+		}
+		if err := New().Trust(context.Background(), pkg); err == nil {
+			t.Fatalf("Trust() accepted %+v", pkg)
+		}
+		if _, err := os.Stat(argsFile); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("invalid trust identity started brew; marker error = %v", err)
+		}
+	}
+}
+
+func TestTrustDetailsRefusesTerminalControls(t *testing.T) {
+	const report = `[{"name":"vendor/tap","remote":"https://example.test/\u001b[2J","HEAD":"abcdef","last_commit":"today"}]`
+	pkg := Package{
+		Name: "widget", Kind: Formula, Untrusted: true,
+		FullName: "vendor/tap/widget", Tap: "vendor/tap",
+	}
+	configureFakeBrew(t, report, "", 0, false)
+	if _, err := New().TrustDetails(context.Background(), pkg); err == nil {
+		t.Fatal("TrustDetails() accepted terminal controls")
 	}
 }
